@@ -8,7 +8,7 @@
   โหมด "live"    : อ่านภาพต่อเนื่องตลอดเวลา แล้วพยายาม OCR ทุกๆ 1 วินาที
                     (เหมาะกับการทดสอบ/ดูผลแบบ real-time)
 
-  โหมด "trigger" << สิ่งประดิษฐ์ใช้โหมดนี้ : ใช้ Motion Detection (background subtraction) เฝ้าดูว่า 
+  โหมด "trigger" : ใช้ Motion Detection (background subtraction) เฝ้าดูว่า
                     มี "วัตถุเคลื่อนที่ขนาดใหญ่" (รถ) เข้ามาในเฟรมหรือไม่
                     - ถ้ามีรถเข้ามา -> ติดตามจนกว่ารถจะออกจากเฟรม
                     - เมื่อรถออกจากเฟรมแล้ว -> เลือกเฟรมที่รถมีขนาดใหญ่ที่สุด
@@ -83,6 +83,10 @@ OCR_LANG = "tha+eng"
 MIN_PLATE_AREA = 1500
 MAX_PLATE_AREA = 60000
 
+# ขนาดกล่องป้ายเทียบกับพื้นที่ทั้งภาพ (ใช้กับวิธีหาป้ายแบบที่ 2 และ 3)
+REL_MIN_PLATE_AREA = 0.01   # อย่างน้อย 1% ของภาพ
+REL_MAX_PLATE_AREA = 0.60   # ไม่เกิน 60% ของภาพ
+
 # สัดส่วนกว้าง/สูง ของป้ายทะเบียนไทยโดยประมาณ (กว้างกว่าสูงพอสมควร)
 MIN_ASPECT_RATIO = 1.5
 MAX_ASPECT_RATIO = 5.5
@@ -98,16 +102,42 @@ EXIT_FRAMES = 10
 # --------------------------------------------------------------------------
 # ฟังก์ชันหาตำแหน่งป้ายทะเบียนที่เป็นไปได้ในภาพ
 # --------------------------------------------------------------------------
+def _boxes_from_mask(mask, frame_area, close_k):
+    """ปิดช่องว่างใน mask แล้วหากล่องสี่เหลี่ยมที่ขนาดและสัดส่วนเข้าข่ายป้าย
+    (ขนาดเทียบกับพื้นที่ภาพ ไม่ผูกกับความละเอียดกล้อง)"""
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (close_k, close_k))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for c in contours:
+        x, y, w, h = cv2.boundingRect(c)
+        if h == 0:
+            continue
+        box_area = w * h
+        if not (REL_MIN_PLATE_AREA * frame_area <= box_area <= REL_MAX_PLATE_AREA * frame_area):
+            continue
+        if MIN_ASPECT_RATIO <= w / float(h) <= MAX_ASPECT_RATIO:
+            boxes.append((x, y, w, h))
+    return boxes
+
+
 def find_plate_candidates(frame: np.ndarray):
     """
     รับภาพ BGR หนึ่งเฟรม แล้วคืนค่าเป็น list ของ bounding box (x, y, w, h)
-    ที่มีลักษณะรูปทรงเข้าข่ายเป็นป้ายทะเบียน
+    ที่มีลักษณะรูปทรงเข้าข่ายเป็นป้ายทะเบียน ใช้ 3 วิธีรวมกัน:
+      1) ขอบภาพ (Canny) + contour พื้นที่แบบ absolute (วิธีเดิม เหมาะกับป้ายขนาดเล็กในภาพ)
+      2) ขอบภาพ + ปิดช่องว่าง + ขนาดเทียบกับภาพ (ป้ายใหญ่ / ขอบขาดตอน)
+      3) สีน้ำเงินของขอบ/ตัวอักษรป้าย (ป้ายตัวอย่างสีน้ำเงิน)
+    กรอบที่ซ้อนกันจะถูกตัดใน process_frame ด้วย non_max_suppression_boxes
     """
+    h_img, w_img = frame.shape[:2]
+    frame_area = h_img * w_img
+
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.bilateralFilter(gray, 11, 17, 17)  # ลด noise แต่รักษาขอบภาพ
-
     edged = cv2.Canny(gray, 30, 200)
 
+    # --- วิธีที่ 1: เดิม ---
     contours, _ = cv2.findContours(
         edged.copy(), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -118,14 +148,19 @@ def find_plate_candidates(frame: np.ndarray):
         area = cv2.contourArea(c)
         if area < MIN_PLATE_AREA or area > MAX_PLATE_AREA:
             continue
-
         x, y, w, h = cv2.boundingRect(c)
         if h == 0:
             continue
-        aspect_ratio = w / float(h)
-
-        if MIN_ASPECT_RATIO <= aspect_ratio <= MAX_ASPECT_RATIO:
+        if MIN_ASPECT_RATIO <= w / float(h) <= MAX_ASPECT_RATIO:
             candidates.append((x, y, w, h))
+
+    # --- วิธีที่ 2: ขอบ + ปิดช่องว่าง ---
+    candidates += _boxes_from_mask(edged, frame_area, close_k=5)
+
+    # --- วิธีที่ 3: สีน้ำเงิน ---
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    blue = cv2.inRange(hsv, (95, 80, 60), (130, 255, 255))
+    candidates += _boxes_from_mask(blue, frame_area, close_k=25)
 
     return candidates
 
@@ -150,16 +185,26 @@ def preprocess_for_ocr(roi: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------
 # ฟังก์ชัน OCR อ่านข้อความจากภาพ ROI ของป้ายทะเบียน
 # --------------------------------------------------------------------------
+def _clean(text: str) -> str:
+    return "".join(ch for ch in text if ch.isalnum()).strip()
+
+
 def ocr_plate(roi: np.ndarray) -> str:
     processed = preprocess_for_ocr(roi)
 
-    # --psm 7 = สมมติว่าเป็นข้อความบรรทัดเดียว เหมาะกับป้ายทะเบียน
-    config = f"--psm 7 -l {OCR_LANG}"
-    text = pytesseract.image_to_string(processed, config=config)
+    # --psm 7 = สมมติว่าเป็นข้อความบรรทัดเดียว เหมาะกับป้ายบรรทัดเดียว
+    text = _clean(pytesseract.image_to_string(processed, config=f"--psm 7 -l {OCR_LANG}"))
+    if len(text) >= 4:
+        return text
 
-    # ทำความสะอาดข้อความที่อ่านได้
-    text = "".join(ch for ch in text if ch.isalnum())
-    return text.strip()
+    # ป้ายไทยหลายแบบมี 2 บรรทัด (หมวดอักษร+เลข / จังหวัด) psm 7 อ่านไม่ออก
+    # จึงลองโหมดอื่นสำรอง (6 = ข้อความเป็นบล็อก, 11 = ข้อความกระจาย)
+    # รับผลสำรองเฉพาะที่ยาวพอและมีตัวเลขอย่างน้อย 1 ตัว (ป้ายไทยมีเลขเสมอ) กัน noise
+    for psm in (6, 11):
+        alt = _clean(pytesseract.image_to_string(processed, config=f"--psm {psm} -l {OCR_LANG}"))
+        if len(alt) >= 4 and any(ch.isdigit() for ch in alt):
+            return alt
+    return text
 
 
 # --------------------------------------------------------------------------
@@ -442,7 +487,7 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
 
 
 # --------------------------------------------------------------------------
-# กล้องจำลอง (ไว้เทสระบบตอนยังไม่มีกล้องจริงเสียบกับบอร์ด) // ตอนนี้มีกล้องแล้ว ตัดออกได้
+# กล้องจำลอง (ไว้เทสระบบตอนยังไม่มีกล้องจริงเสียบกับบอร์ด)
 # --------------------------------------------------------------------------
 class SimCamera:
     """

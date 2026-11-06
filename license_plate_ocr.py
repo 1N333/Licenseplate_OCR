@@ -42,6 +42,8 @@
 
     # ทดสอบกับไฟล์ภาพนิ่ง
     python3 license_plate_ocr.py --image test.jpg
+    # ป้ายไทย: ให้อ่านเป็นภาษาไทยอย่างเดียว (กัน ฬม ถูกอ่านเป็น Hu)
+    python3 license_plate_ocr.py --image test.jpg --lang tha
 
     # ส่งผลขึ้น dashboard ที่ server (ดู plate_server.py) ทุกครั้งที่มีรถผ่านในโหมด trigger
     python3 license_plate_ocr.py --camera usb --mode trigger \\
@@ -799,6 +801,11 @@ def main():
         help="จำกัดจำนวนเฟรมแล้วหยุดอัตโนมัติ (มีประโยชน์เวลาเทสด้วย --camera sim)"
     )
     parser.add_argument(
+        "--lang", type=str, default=os.environ.get("PLATE_OCR_LANG", OCR_LANG),
+        help="ภาษา OCR ของ Tesseract: tha = ไทยอย่างเดียว (แนะนำสำหรับป้ายไทย ไม่ถูกอ่านเป็นตัวอังกฤษ), "
+             "tha+eng = ไทยและอังกฤษ (ค่าเริ่มต้น), eng = อังกฤษ (หรือกำหนดด้วยตัวแปร PLATE_OCR_LANG)"
+    )
+    parser.add_argument(
         "--server-url", type=str, default=os.environ.get("PLATE_SERVER_URL"),
         help="URL ของ server dashboard เช่น http://192.168.1.50:8000 (ไม่ใส่ = ไม่ส่งขึ้น server)"
     )
@@ -811,6 +818,8 @@ def main():
         help="ชื่ออุปกรณ์/จุดติดตั้ง แสดงบน dashboard (ค่าเริ่มต้น gate-01)"
     )
     args = parser.parse_args()
+
+    globals()["OCR_LANG"] = args.lang  # ให้ฟังก์ชัน OCR ใช้ภาษาที่เลือก
 
     if args.image:
         run_on_image(args.image)

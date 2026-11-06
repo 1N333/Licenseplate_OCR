@@ -42,6 +42,8 @@
 
     # ทดสอบกับไฟล์ภาพนิ่ง
     python3 license_plate_ocr.py --image test.jpg
+    # เทียบกับทะเบียนที่รู้จัก (ยอมให้ผิดตัวที่หน้าตาคล้ายกัน เช่น ฬ/ฟ)
+    python3 license_plate_ocr.py --image test.jpg --lang tha --known-plates known_plates.txt
     # ป้ายไทย: ให้อ่านเป็นภาษาไทยอย่างเดียว (กัน ฬม ถูกอ่านเป็น Hu)
     python3 license_plate_ocr.py --image test.jpg --lang tha
 
@@ -401,13 +403,14 @@ class ServerUploader:
       สูงสุด 60 วินาที คิวเก็บอยู่ในไฟล์ จึงไม่หายแม้ปิดเครื่อง/รีสตาร์ต
     """
 
-    def __init__(self, server_url: str, api_key: str, device_id: str, queue_db: Path):
+    def __init__(self, server_url: str, api_key: str, device_id: str, queue_db: Path,
+                 path: str = "/api/plates"):
         try:
             import requests  # นำเข้าตอนใช้งานจริงเท่านั้น
         except ImportError as exc:
             raise RuntimeError("ต้องติดตั้ง requests ก่อน: pip install requests") from exc
         self._requests = requests
-        self.url = server_url.rstrip("/") + "/api/plates"
+        self.url = server_url.rstrip("/") + "/" + path.lstrip("/")
         self.api_key = api_key
         self.device_id = device_id
         queue_db.parent.mkdir(parents=True, exist_ok=True)
@@ -426,7 +429,7 @@ class ServerUploader:
 
     def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path):
         payload = {"time": timestamp, "direction": direction,
-                   "plate": plate_text, "device": self.device_id}
+                   "plate": plate_text or "UNREADABLE", "device": self.device_id}
         with self._conn() as c:
             c.execute("INSERT INTO queue (payload, image_path) VALUES (?, ?)",
                       (json.dumps(payload, ensure_ascii=False), str(image_path)))
@@ -465,6 +468,13 @@ class ServerUploader:
             try:
                 self._send(json.loads(payload), image_path)
             except Exception as exc:  # เน็ตหลุด/server ผิดพลาด -> เก็บคิวไว้ ลองใหม่
+                resp = getattr(exc, "response", None)
+                if resp is not None and resp.status_code in (400, 413, 422):
+                    # server ปฏิเสธข้อมูลนี้ถาวร (ส่งซ้ำก็ไม่ผ่าน) -> ทิ้ง ไม่ให้คิวค้างทั้งแถว
+                    print(f"[WARN] server ปฏิเสธรายการนี้ ({resp.status_code}) ข้ามไป")
+                    with self._conn() as c:
+                        c.execute("DELETE FROM queue WHERE id = ?", (row_id,))
+                    continue
                 print(f"[WARN] ส่งขึ้น server ไม่สำเร็จ ({exc.__class__.__name__}) "
                       f"คิวค้าง {self.pending()} รายการ จะลองใหม่ใน {backoff} วินาที")
                 self._stop.wait(backoff)
@@ -491,13 +501,25 @@ class ServerUploader:
 # ฟังก์ชันบันทึกผลลัพธ์ (ภาพ + แถวใน log.csv)
 # --------------------------------------------------------------------------
 def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
-               uploader: "ServerUploader" = None):
+               uploader: "ServerUploader" = None, matcher: "PlateMatcher" = None):
     save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now()
     ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
     annotated, results = process_frame(captured_frame.copy())
-    plate_text = results[0][0] if results else ""
+    raw_text = results[0][0] if results else ""
+
+    # เทียบกับทะเบียนที่รู้จัก (ถ้าเปิดใช้) ใช้ทะเบียนที่จับคู่ได้เป็นผลสุดท้าย
+    plate_text, match_note = raw_text, ""
+    if matcher is not None and raw_text:
+        matched, dist, note = matcher.match(raw_text)
+        if matched:
+            plate_text = matched
+            match_note = "ตรง" if dist == 0 else f"ใกล้เคียง({dist:.1f})"
+            if note:
+                match_note += f" {note}"
+        elif note == "กำกวม":
+            match_note = "กำกวม"
 
     image_filename = f"{ts_str}_{direction}_{plate_text or 'unknown'}.jpg"
     image_path = save_dir / image_filename
@@ -508,20 +530,94 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
     with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         if is_new_file:
-            writer.writerow(["timestamp", "direction", "plate_text", "image_file"])
+            writer.writerow(["timestamp", "direction", "plate_text", "image_file",
+                             "ocr_raw", "match_note"])
         writer.writerow([
             timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             direction,
             plate_text,
             image_filename,
+            raw_text,
+            match_note,
         ])
 
-    print(f"[{ts_str}] รถ{direction} -> ป้ายทะเบียน: '{plate_text or 'อ่านไม่ได้'}' "
+    shown = f"'{plate_text or 'อ่านไม่ได้'}'"
+    if raw_text and plate_text != raw_text:
+        shown += f" (OCR อ่านได้ '{raw_text}' -> {match_note})"
+    elif match_note:
+        shown += f" ({match_note})"
+    print(f"[{ts_str}] รถ{direction} -> ป้ายทะเบียน: {shown} "
           f"| บันทึกภาพที่: {image_path}")
 
     if uploader is not None:
         uploader.enqueue(timestamp.strftime("%Y-%m-%d %H:%M:%S"), direction,
                          plate_text, image_path)
+
+
+# --------------------------------------------------------------------------
+# เทียบผล OCR กับทะเบียนที่รู้จัก (ยอมให้ผิดตัวที่หน้าตาคล้ายกัน เช่น ฬ/ฟ)
+# --------------------------------------------------------------------------
+# กลุ่มตัวอักษรที่ OCR มักอ่านสลับกัน: สลับกันในกลุ่มเดียวกันนับเป็น "ผิดเล็กน้อย"
+CONFUSABLE_GROUPS = ["ฬฟพ", "ผฝ", "ขฃ", "ชซ", "ดคต", "ถภ", "บป", "วร", "มฆ",
+                     "ลส", "ฎฏ", "ยษ", "จฉ", "นห", "0O", "1Il", "2Z", "5S", "8B", "6G"]
+_CONFUSABLE = {}
+for _g in CONFUSABLE_GROUPS:
+    for _a in _g:
+        for _b in _g:
+            if _a != _b:
+                _CONFUSABLE[(_a, _b)] = 0.3
+
+
+def plate_distance(a: str, b: str) -> float:
+    """ระยะห่างระหว่างข้อความสองชุด (Levenshtein แบบถ่วงน้ำหนัก)
+    แทนที่ตัวที่หน้าตาคล้ายกัน = 0.3, แทนที่ตัวอื่น/เพิ่ม/ลบ = 1.0"""
+    n, m = len(a), len(b)
+    prev = [float(j) for j in range(m + 1)]
+    for i in range(1, n + 1):
+        cur = [float(i)] + [0.0] * m
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                sub = 0.0
+            else:
+                sub = _CONFUSABLE.get((a[i - 1], b[j - 1]), 1.0)
+            cur[j] = min(prev[j] + 1.0, cur[j - 1] + 1.0, prev[j - 1] + sub)
+        prev = cur
+    return prev[m]
+
+
+class PlateMatcher:
+    """เทียบข้อความที่ OCR อ่านได้กับรายการทะเบียนที่รู้จัก (ไฟล์ข้อความ บรรทัดละ 1 ทะเบียน
+    ใส่ชื่อ/หมายเหตุต่อท้ายหลังเครื่องหมาย , ได้ เช่น  ฬม99,รถผู้อำนวยการ)
+
+    คืนค่าทะเบียนที่ใกล้เคียงที่สุด ถ้าระยะห่าง <= threshold และชัดเจนกว่าตัวเลือกอื่น
+    (ถ้ามีหลายทะเบียนใกล้เคียงพอๆ กัน ถือว่า "กำกวม" ไม่เลือกให้)"""
+
+    def __init__(self, path, threshold=0.9, margin=0.3):
+        self.threshold = threshold
+        self.margin = margin
+        self.plates = []      # [(ทะเบียน, หมายเหตุ)]
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                plate, _, note = line.partition(",")
+                plate = _clean(plate.replace(" ", ""))
+                if plate:
+                    self.plates.append((plate, note.strip()))
+
+    def match(self, text: str):
+        """คืน (ทะเบียนที่จับคู่ได้ หรือ None, ระยะห่าง, หมายเหตุ)"""
+        text = _clean(text.replace(" ", ""))
+        if not text or not self.plates:
+            return None, None, ""
+        scored = sorted((plate_distance(text, p), p, note) for p, note in self.plates)
+        best = scored[0]
+        if best[0] > self.threshold:
+            return None, best[0], ""
+        if len(scored) > 1 and scored[1][0] <= self.threshold and scored[1][0] - best[0] < self.margin:
+            return None, best[0], "กำกวม"
+        return best[1], best[0], best[2]
 
 
 # --------------------------------------------------------------------------
@@ -664,7 +760,7 @@ def open_camera(source: str, cam_index: int = 0):
 # --------------------------------------------------------------------------
 # โหมดที่ 1: อ่านจากไฟล์ภาพนิ่ง
 # --------------------------------------------------------------------------
-def run_on_image(image_path: str):
+def run_on_image(image_path: str, matcher: "PlateMatcher" = None):
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"[ERROR] ไม่พบไฟล์ภาพ: {image_path}")
@@ -674,6 +770,15 @@ def run_on_image(image_path: str):
 
     for text, box in results:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] อ่านป้ายทะเบียนได้: {text}")
+        if matcher is not None:
+            matched, dist, note = matcher.match(text)
+            if matched:
+                print(f"    -> จับคู่กับทะเบียนที่รู้จัก: {matched}"
+                      f"{' (' + note + ')' if note else ''} ระยะห่าง {dist:.1f}")
+            elif note == "กำกวม":
+                print("    -> ใกล้เคียงหลายทะเบียนพอๆ กัน เลือกให้ไม่ได้")
+            else:
+                print("    -> ไม่ตรงกับทะเบียนใดในรายการ")
 
     out_path = "plate_result.jpg"
     cv2.imwrite(out_path, frame)
@@ -727,7 +832,8 @@ def run_live_mode(source: str, cam_index: int = 0, headless: bool = False,
 # --------------------------------------------------------------------------
 def run_trigger_mode(source: str, cam_index: int = 0, save_dir: str = "captures",
                       min_area: int = MIN_VEHICLE_AREA, headless: bool = False,
-                      max_frames: int = None, uploader: "ServerUploader" = None):
+                      max_frames: int = None, uploader: "ServerUploader" = None,
+                      matcher: "PlateMatcher" = None):
     read_frame, release = open_camera(source, cam_index)
     watcher = VehicleWatcher(min_area=min_area)
     save_path = Path(save_dir)
@@ -746,7 +852,7 @@ def run_trigger_mode(source: str, cam_index: int = 0, save_dir: str = "captures"
 
             event, captured_frame, direction = watcher.update(frame)
             if event == "captured":
-                save_event(save_path, captured_frame, direction, uploader)
+                save_event(save_path, captured_frame, direction, uploader, matcher)
 
             if not headless:
                 status = "กำลังติดตามรถ..." if watcher.tracking else "รอรถเข้ามา"
@@ -815,6 +921,16 @@ def main():
              "tha+eng = ไทยและอังกฤษ (ค่าเริ่มต้น), eng = อังกฤษ (หรือกำหนดด้วยตัวแปร PLATE_OCR_LANG)"
     )
     parser.add_argument(
+        "--known-plates", type=str, default=os.environ.get("PLATE_KNOWN_FILE"),
+        help="ไฟล์รายชื่อทะเบียนที่รู้จัก (บรรทัดละ 1 ทะเบียน, ใส่หมายเหตุหลัง , ได้) "
+             "ถ้าระบุ จะเทียบผล OCR กับรายการนี้แบบยอมให้ผิดตัวที่หน้าตาคล้ายกัน (เช่น ฬ/ฟ)"
+    )
+    parser.add_argument(
+        "--match-threshold", type=float, default=0.9,
+        help="ระยะห่างสูงสุดที่ยอมให้จับคู่ (สลับตัวหน้าตาคล้าย = 0.3, ผิดตัวอื่น/ขาด/เกิน = 1.0) "
+             "ค่าเริ่มต้น 0.9; ตั้งต่ำลง = เข้มงวดขึ้น"
+    )
+    parser.add_argument(
         "--server-url", type=str, default=os.environ.get("PLATE_SERVER_URL"),
         help="URL ของ server dashboard เช่น http://192.168.1.50:8000 (ไม่ใส่ = ไม่ส่งขึ้น server)"
     )
@@ -826,22 +942,32 @@ def main():
         "--device-id", type=str, default=os.environ.get("PLATE_DEVICE_ID", "gate-01"),
         help="ชื่ออุปกรณ์/จุดติดตั้ง แสดงบน dashboard (ค่าเริ่มต้น gate-01)"
     )
+    parser.add_argument(
+        "--server-path", type=str, default=os.environ.get("PLATE_SERVER_PATH", "/api/plates"),
+        help="path ของ API บน server: dashboard Next.js (CRUD_Project) ใช้ /api/detections, "
+             "plate_server.py ใช้ /api/plates (ค่าเริ่มต้น)"
+    )
     args = parser.parse_args()
 
     globals()["OCR_LANG"] = args.lang  # ให้ฟังก์ชัน OCR ใช้ภาษาที่เลือก
 
+    matcher = None
+    if args.known_plates:
+        matcher = PlateMatcher(args.known_plates, threshold=args.match_threshold)
+        print(f"[INFO] โหลดทะเบียนที่รู้จัก {len(matcher.plates)} รายการจาก {args.known_plates}")
+
     if args.image:
-        run_on_image(args.image)
+        run_on_image(args.image, matcher)
     elif args.camera and args.mode == "live":
         run_live_mode(args.camera, args.cam_index, args.headless, args.max_frames)
     elif args.camera and args.mode == "trigger":
         uploader = None
         if args.server_url:
             uploader = ServerUploader(args.server_url, args.api_key, args.device_id,
-                                      Path(args.save_dir) / "upload_queue.db")
+                                      Path(args.save_dir) / "upload_queue.db", args.server_path)
             print(f"[INFO] จะส่งผลขึ้น server: {args.server_url} (อุปกรณ์: {args.device_id})")
         run_trigger_mode(args.camera, args.cam_index, args.save_dir, args.min_area,
-                          args.headless, args.max_frames, uploader)
+                          args.headless, args.max_frames, uploader, matcher)
     else:
         parser.print_help()
 

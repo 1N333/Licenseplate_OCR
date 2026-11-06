@@ -89,6 +89,9 @@ MAX_PLATE_AREA = 60000
 REL_MIN_PLATE_AREA = 0.01   # อย่างน้อย 1% ของภาพ
 REL_MAX_PLATE_AREA = 0.60   # ไม่เกิน 60% ของภาพ
 
+# จำนวนป้ายสูงสุดที่รายงานต่อหนึ่งเฟรม (หน้าประตูมักมีรถคันเดียว ตั้งเป็น 1)
+MAX_PLATES_PER_FRAME = 1
+
 # การตัดภาพป้ายก่อน OCR
 EDGE_MARGIN = 0.05            # ตัดขอบป้ายออกด้านละ 5%
 TWO_LINE_ASPECT = 2.6         # กว้าง/สูง ต่ำกว่านี้ = ป้าย 2 บรรทัด (ป้ายไทยมาตรฐาน ~2.2)
@@ -286,11 +289,17 @@ def process_frame(frame: np.ndarray):
 
         if len(text) >= 4:  # กรองผลลัพธ์ที่สั้นเกินไป (มักเป็น noise)
             results.append((text, (x, y, w, h)))
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(
-                frame, text, (x, max(y - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
-            )
+
+    # เก็บเฉพาะป้ายที่ใหญ่ที่สุด (ใกล้กล้องที่สุด) กรอบอื่นมักเป็นวัตถุอื่นที่ถูกอ่านเป็น noise
+    results.sort(key=lambda r: r[1][2] * r[1][3], reverse=True)
+    results = results[:MAX_PLATES_PER_FRAME]
+
+    for text, (x, y, w, h) in results:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(
+            frame, text, (x, max(y - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+        )
 
     return frame, results
 

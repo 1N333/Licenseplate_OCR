@@ -87,6 +87,11 @@ MAX_PLATE_AREA = 60000
 REL_MIN_PLATE_AREA = 0.01   # อย่างน้อย 1% ของภาพ
 REL_MAX_PLATE_AREA = 0.60   # ไม่เกิน 60% ของภาพ
 
+# การตัดภาพป้ายก่อน OCR
+EDGE_MARGIN = 0.05            # ตัดขอบป้ายออกด้านละ 5%
+TWO_LINE_ASPECT = 2.6         # กว้าง/สูง ต่ำกว่านี้ = ป้าย 2 บรรทัด (ป้ายไทยมาตรฐาน ~2.2)
+TWO_LINE_TOP_FRACTION = 0.62  # ป้าย 2 บรรทัด: เอาเฉพาะ 62% ส่วนบน (บรรทัดทะเบียน)
+
 # สัดส่วนกว้าง/สูง ของป้ายทะเบียนไทยโดยประมาณ (กว้างกว่าสูงพอสมควร)
 MIN_ASPECT_RATIO = 1.5
 MAX_ASPECT_RATIO = 5.5
@@ -186,20 +191,42 @@ def preprocess_for_ocr(roi: np.ndarray) -> np.ndarray:
 # ฟังก์ชัน OCR อ่านข้อความจากภาพ ROI ของป้ายทะเบียน
 # --------------------------------------------------------------------------
 def _clean(text: str) -> str:
-    return "".join(ch for ch in text if ch.isalnum()).strip()
+    """เก็บเฉพาะตัวที่ป้ายทะเบียนไทยมีได้: พยัญชนะไทย (ก-ฮ), ตัวเลข (แปลงเลขไทยเป็นเลขอารบิก)
+    และตัวอักษรอังกฤษ ทิ้งสระ/วรรณยุกต์ซึ่งไม่มีบนป้าย (มักเป็นขอบป้ายหรือ noise ที่ถูกอ่านผิด)"""
+    out = []
+    for ch in text:
+        if "\u0e01" <= ch <= "\u0e2e":
+            out.append(ch)
+        elif ch.isdigit():
+            out.append(str(int(ch)))
+        elif ch.isascii() and ch.isalpha():
+            out.append(ch)
+    return "".join(out)
+
+
+def crop_plate_text_area(roi: np.ndarray) -> np.ndarray:
+    """ตัดขอบป้ายออก และถ้าเป็นป้าย 2 บรรทัด (สัดส่วนกว้าง/สูง < TWO_LINE_ASPECT)
+    ให้เหลือเฉพาะบรรทัดบน (หมวดอักษร + เลขทะเบียน) ไม่เอาบรรทัดชื่อจังหวัด
+    ขอบป้ายที่ติดมาในภาพมักถูก OCR เป็นตัวอักษรเกิน (เช่น แ, l, |)"""
+    h, w = roi.shape[:2]
+    x0, x1 = int(w * EDGE_MARGIN), int(w * (1 - EDGE_MARGIN))
+    y0 = int(h * EDGE_MARGIN)
+    y1 = int(h * TWO_LINE_TOP_FRACTION) if (w / float(h)) < TWO_LINE_ASPECT else int(h * (1 - EDGE_MARGIN))
+    if x1 - x0 < 10 or y1 - y0 < 10:
+        return roi
+    return roi[y0:y1, x0:x1]
 
 
 def ocr_plate(roi: np.ndarray) -> str:
-    processed = preprocess_for_ocr(roi)
+    processed = preprocess_for_ocr(crop_plate_text_area(roi))
 
-    # --psm 7 = สมมติว่าเป็นข้อความบรรทัดเดียว เหมาะกับป้ายบรรทัดเดียว
+    # --psm 7 = ข้อความบรรทัดเดียว (หลังตัดเหลือบรรทัดบนของป้ายแล้ว)
     text = _clean(pytesseract.image_to_string(processed, config=f"--psm 7 -l {OCR_LANG}"))
     if len(text) >= 4:
         return text
 
-    # ป้ายไทยหลายแบบมี 2 บรรทัด (หมวดอักษร+เลข / จังหวัด) psm 7 อ่านไม่ออก
-    # จึงลองโหมดอื่นสำรอง (6 = ข้อความเป็นบล็อก, 11 = ข้อความกระจาย)
-    # รับผลสำรองเฉพาะที่ยาวพอและมีตัวเลขอย่างน้อย 1 ตัว (ป้ายไทยมีเลขเสมอ) กัน noise
+    # ถ้าอ่านไม่ได้ ลองโหมดสำรอง (6 = ข้อความเป็นบล็อก, 11 = ข้อความกระจาย)
+    # รับผลเฉพาะที่ยาวพอและมีตัวเลขอย่างน้อย 1 ตัว (ป้ายไทยมีเลขเสมอ) กัน noise
     for psm in (6, 11):
         alt = _clean(pytesseract.image_to_string(processed, config=f"--psm {psm} -l {OCR_LANG}"))
         if len(alt) >= 4 and any(ch.isdigit() for ch in alt):

@@ -224,16 +224,55 @@ def crop_plate_text_area(roi: np.ndarray) -> np.ndarray:
     return roi[y0:y1, x0:x1]
 
 
-def ocr_plate(roi: np.ndarray) -> str:
-    processed = preprocess_for_ocr(crop_plate_text_area(roi))
+def _ocr_variants(roi: np.ndarray) -> list:
+    """สร้างภาพหลายแบบจาก ROI เดียวกัน (ต่างหน้าต่างตัด/ต่างวิธีทำขาวดำ)
+    เพื่ออ่านหลายรอบแล้วโหวต: การอ่านครั้งเดียวของ Tesseract ภาษาไทยแกว่งง่าย
+    (ฬ ถูกอ่านเป็น ฟ/พ/ฟิม ฯลฯ) แต่ผลที่ออกบ่อยที่สุดมักใกล้เคียงของจริง"""
+    h, w = roi.shape[:2]
+    two_line = (w / float(h)) < TWO_LINE_ASPECT
+    # (บน, ล่าง, ซ้าย, ขวา) เป็นสัดส่วนของกรอบ; ป้าย 2 บรรทัดเอาเฉพาะบรรทัดบน
+    windows = ([(0.05, 0.60, 0.06, 0.94), (0.05, 0.65, 0.05, 0.95)] if two_line
+               else [(0.05, 0.95, 0.05, 0.95)])
+    out = []
+    for y0, y1, x0, x1 in windows:
+        c = roi[int(h * y0):int(h * y1), int(w * x0):int(w * x1)]
+        if c.shape[0] < 10 or c.shape[1] < 10:
+            continue
+        gray = cv2.resize(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), None, fx=3, fy=3,
+                          interpolation=cv2.INTER_CUBIC)
+        # ช่องสีแดง: ตัวหนังสือสีน้ำเงินจะมืดชัด พื้นขาวสว่าง -> คอนทราสต์ดีกว่า gray
+        red = cv2.resize(c[:, :, 2], None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        red_otsu = cv2.threshold(red, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        out += [gray, red, red_otsu]
+    return out
 
-    # --psm 7 = ข้อความบรรทัดเดียว (หลังตัดเหลือบรรทัดบนของป้ายแล้ว)
+
+def _consensus(reads: list) -> str:
+    """เลือกผลอ่านที่ 'อยู่กลาง' ที่สุด คือผลรวมระยะห่างถึงผลอื่นต่ำสุด"""
+    best_text, best_score = "", None
+    for a in reads:
+        score = sum(plate_distance(a, b) for b in reads)
+        if best_score is None or score < best_score:
+            best_text, best_score = a, score
+    return best_text
+
+
+def ocr_plate(roi: np.ndarray) -> str:
+    # อ่านหลายรอบ (psm 7 = บรรทัดเดียว) จากภาพหลายแบบ แล้วโหวตเอาผลกลาง
+    reads = []
+    for variant in _ocr_variants(roi):
+        text = _clean(pytesseract.image_to_string(variant, config=f"--psm 7 -l {OCR_LANG}"))
+        # ป้ายไทยมีตัวเลขเสมอ และยาวอย่างน้อย 3 ตัว -> ทิ้งผลที่เป็น noise
+        if len(text) >= 3 and any(ch.isdigit() for ch in text):
+            reads.append(text)
+    if reads:
+        return _consensus(reads)
+
+    # สำรอง: วิธีเดิม (ตัดขอบ + preprocess + psm 7/6/11)
+    processed = preprocess_for_ocr(crop_plate_text_area(roi))
     text = _clean(pytesseract.image_to_string(processed, config=f"--psm 7 -l {OCR_LANG}"))
     if len(text) >= 4:
         return text
-
-    # ถ้าอ่านไม่ได้ ลองโหมดสำรอง (6 = ข้อความเป็นบล็อก, 11 = ข้อความกระจาย)
-    # รับผลเฉพาะที่ยาวพอและมีตัวเลขอย่างน้อย 1 ตัว (ป้ายไทยมีเลขเสมอ) กัน noise
     for psm in (6, 11):
         alt = _clean(pytesseract.image_to_string(processed, config=f"--psm {psm} -l {OCR_LANG}"))
         if len(alt) >= 4 and any(ch.isdigit() for ch in alt):
@@ -404,7 +443,11 @@ class ServerUploader:
     """
 
     def __init__(self, server_url: str, api_key: str, device_id: str, queue_db: Path,
-                 path: str = "/api/plates"):
+                 path: str = "/api/plates", send_unreadable: bool = False,
+                 dedupe_seconds: float = 30.0):
+        self.send_unreadable = send_unreadable
+        self.dedupe_seconds = dedupe_seconds
+        self._last_sent = {}  # plate -> เวลา (monotonic) ที่คิวล่าสุด
         try:
             import requests  # นำเข้าตอนใช้งานจริงเท่านั้น
         except ImportError as exc:
@@ -428,6 +471,14 @@ class ServerUploader:
         return sqlite3.connect(self.db_path)
 
     def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path):
+        if not plate_text and not self.send_unreadable:
+            return  # อ่านไม่ได้ -> ไม่ส่งขึ้น dashboard (ยังบันทึกใน log.csv/ภาพในเครื่อง)
+        now = time.monotonic()
+        if plate_text and self.dedupe_seconds > 0:
+            last = self._last_sent.get(plate_text)
+            if last is not None and now - last < self.dedupe_seconds:
+                return  # ป้ายเดิมเพิ่งส่งไป ไม่ส่งซ้ำ
+            self._last_sent[plate_text] = now
         payload = {"time": timestamp, "direction": direction,
                    "plate": plate_text or "UNREADABLE", "device": self.device_id}
         with self._conn() as c:
@@ -947,6 +998,14 @@ def main():
         help="path ของ API บน server: dashboard Next.js (CRUD_Project) ใช้ /api/detections, "
              "plate_server.py ใช้ /api/plates (ค่าเริ่มต้น)"
     )
+    parser.add_argument(
+        "--upload-unreadable", action="store_true",
+        help="ส่งรายการที่อ่านป้ายไม่ได้ขึ้น dashboard ด้วย (ปกติไม่ส่ง)"
+    )
+    parser.add_argument(
+        "--dedupe-seconds", type=float, default=30.0,
+        help="ไม่ส่งป้ายเดิมซ้ำภายในกี่วินาที (ค่าเริ่มต้น 30; 0 = ส่งทุกครั้ง)"
+    )
     args = parser.parse_args()
 
     globals()["OCR_LANG"] = args.lang  # ให้ฟังก์ชัน OCR ใช้ภาษาที่เลือก
@@ -964,7 +1023,8 @@ def main():
         uploader = None
         if args.server_url:
             uploader = ServerUploader(args.server_url, args.api_key, args.device_id,
-                                      Path(args.save_dir) / "upload_queue.db", args.server_path)
+                                      Path(args.save_dir) / "upload_queue.db", args.server_path,
+                                      args.upload_unreadable, args.dedupe_seconds)
             print(f"[INFO] จะส่งผลขึ้น server: {args.server_url} (อุปกรณ์: {args.device_id})")
         run_trigger_mode(args.camera, args.cam_index, args.save_dir, args.min_area,
                           args.headless, args.max_frames, uploader, matcher)

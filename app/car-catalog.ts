@@ -1,0 +1,82 @@
+const modelsByBrand: Record<string, string[]> = {
+  Toyota: [
+    "Yaris",
+    "Yaris ATIV",
+    "Yaris Cross",
+    "Corolla Cross",
+    "Corolla Altis",
+    "Camry",
+    "Veloz",
+    "Innova Zenix",
+    "Fortuner",
+    "Hilux Revo",
+    "Alphard/Vellfire",
+    "bZ4X",
+  ],
+  Honda: [
+    "City Sedan",
+    "City Hatchback",
+    "Civic",
+    "HR-V",
+    "CR-V",
+    "BR-V",
+    "WR-V",
+    "Accord",
+    "e:N1",
+  ],
+  Isuzu: ["D-Max", "MU-X"],
+  Mitsubishi: ["Triton", "Pajero Sport", "Xpander", "Xforce", "Attrage"],
+  Mazda: ["Mazda2", "Mazda3", "CX-3", "CX-30", "CX-5", "CX-8", "BT-50"],
+  Nissan: ["Almera", "Kicks e-Power", "Navara", "Terra", "Leaf"],
+  Suzuki: ["Swift", "Ertiga", "XL7", "Celerio"],
+  BYD: [
+    "Dolphin",
+    "Atto 3",
+    "Atto 2",
+    "Seal",
+    "Seal 5 DM-i",
+    "Sealion 6",
+    "Sealion 7",
+    "M6",
+  ],
+  Denza: ["D9"],
+  "MG (SAIC)": [
+    "MG3 Hybrid+",
+    "MG5",
+    "MG ZS",
+    "MG VS HEV",
+    "MG4 Electric",
+    "MG Cyberster",
+    "MG Extender",
+  ],
+  "Chery Group": ["Omoda 5", "Jaecoo 7", "Jaecoo 5", "Chery Tiggo"],
+  GWM: [
+    "Ora Good Cat",
+    "Haval Jolion",
+    "Haval H6 HEV",
+    "Tank 300",
+    "Tank 500",
+    "Poer",
+  ],
+  "Changan Group": ["Deepal S07", "Deepal L07", "Nevo"],
+  "GAC Group": ["Aion ES", "Aion Y Plus", "Aion V", "Hyptec HT"],
+  Zeekr: ["001", "7X"],
+  Xpeng: ["G6", "G9"],
+  Neta: [],
+  "Mercedes-Benz": ["C-Class", "E-Class", "GLC", "GLA", "EQE", "EQS"],
+  BMW: ["Series 3", "Series 5", "X1", "X3", "X5", "i4", "iX1", "iX3"],
+  Volvo: ["XC40", "XC60", "XC90", "EX30", "EX90"],
+  MINI: ["Cooper", "Countryman"],
+  Ford: ["Ranger", "Everest"],
+  Hyundai: ["Staria", "Ioniq 5", "Ioniq 6", "Creta"],
+  Kia: ["Carens"],
+};
+
+export const carBrands = Object.keys(modelsByBrand);
+
+export function getModelsForBrand(brand: string): string[] {
+  const matchingBrand = carBrands.find(
+    (option) => option.toLocaleLowerCase() === brand.trim().toLocaleLowerCase(),
+  );
+  return matchingBrand ? modelsByBrand[matchingBrand] : [];
+}

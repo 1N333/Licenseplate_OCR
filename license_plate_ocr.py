@@ -257,27 +257,30 @@ def _consensus(reads: list) -> str:
     return best_text
 
 
+# เกณฑ์ความเชื่อมั่นของการโหวต: ป้ายจริงอ่านซ้ำแล้วได้ผลตรงกันเกือบทุกรอบ
+# ส่วนกรอบที่ไม่ใช่ป้าย (ประตู ขอบกระดาษ ฯลฯ) มักอ่านได้แค่รอบสองรอบและแต่ละรอบไม่ตรงกัน
+MIN_VALID_READS = 3        # ต้องมีผลอ่านที่ใช้ได้ (>=3 ตัว มีเลข) อย่างน้อยกี่รอบ
+MIN_AGREEMENT = 0.6        # สัดส่วนผลอ่านที่ต้องใกล้เคียงผลโหวต (ระยะห่าง <= AGREE_DIST)
+AGREE_DIST = 0.6
+MAX_PLATE_CHARS = 8        # ป้ายไทยยาวสุดราว 7 ตัว (หมวด 3 + เลข 4)
+
+
 def ocr_plate(roi: np.ndarray) -> str:
-    # อ่านหลายรอบ (psm 7 = บรรทัดเดียว) จากภาพหลายแบบ แล้วโหวตเอาผลกลาง
+    """อ่านหลายรอบจากภาพหลายแบบ (psm 7) แล้วโหวตเอาผลกลาง
+    ถ้าผลอ่านไม่ตรงกันพอ/มีน้อยเกินไป คืน "" (ถือว่าอ่านไม่ได้) ดีกว่าส่งข้อความมั่ว"""
     reads = []
     for variant in _ocr_variants(roi):
         text = _clean(pytesseract.image_to_string(variant, config=f"--psm 7 -l {OCR_LANG}"))
         # ป้ายไทยมีตัวเลขเสมอ และยาวอย่างน้อย 3 ตัว -> ทิ้งผลที่เป็น noise
         if len(text) >= 3 and any(ch.isdigit() for ch in text):
             reads.append(text)
-    if reads:
-        return _consensus(reads)
-
-    # สำรอง: วิธีเดิม (ตัดขอบ + preprocess + psm 7/6/11)
-    processed = preprocess_for_ocr(crop_plate_text_area(roi))
-    text = _clean(pytesseract.image_to_string(processed, config=f"--psm 7 -l {OCR_LANG}"))
-    if len(text) >= 4:
-        return text
-    for psm in (6, 11):
-        alt = _clean(pytesseract.image_to_string(processed, config=f"--psm {psm} -l {OCR_LANG}"))
-        if len(alt) >= 4 and any(ch.isdigit() for ch in alt):
-            return alt
-    return text
+    if len(reads) < MIN_VALID_READS:
+        return ""
+    best = _consensus(reads)
+    agree = sum(1 for r in reads if plate_distance(best, r) <= AGREE_DIST)
+    if len(best) > MAX_PLATE_CHARS or agree / len(reads) < MIN_AGREEMENT:
+        return ""
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -470,17 +473,21 @@ class ServerUploader:
         # เปิดการเชื่อมต่อใหม่ทุกครั้ง เพราะ sqlite3 ห้ามข้ามเธรด
         return sqlite3.connect(self.db_path)
 
-    def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path):
+    def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path,
+                province: str = ""):
         if not plate_text and not self.send_unreadable:
             return  # อ่านไม่ได้ -> ไม่ส่งขึ้น dashboard (ยังบันทึกใน log.csv/ภาพในเครื่อง)
         now = time.monotonic()
         if plate_text and self.dedupe_seconds > 0:
-            last = self._last_sent.get(plate_text)
+            key = (plate_text, province)
+            last = self._last_sent.get(key)
             if last is not None and now - last < self.dedupe_seconds:
                 return  # ป้ายเดิมเพิ่งส่งไป ไม่ส่งซ้ำ
-            self._last_sent[plate_text] = now
+            self._last_sent[key] = now
         payload = {"time": timestamp, "direction": direction,
                    "plate": plate_text or "UNREADABLE", "device": self.device_id}
+        if province:
+            payload["province"] = province
         with self._conn() as c:
             c.execute("INSERT INTO queue (payload, image_path) VALUES (?, ?)",
                       (json.dumps(payload, ensure_ascii=False), str(image_path)))
@@ -549,6 +556,99 @@ class ServerUploader:
 
 
 # --------------------------------------------------------------------------
+# อ่านจังหวัดจากบรรทัดล่างของป้าย (ป้ายไทย 2 บรรทัด) แล้วจับคู่กับรายชื่อ 77 จังหวัด
+# --------------------------------------------------------------------------
+THAI_PROVINCES = [
+    "กำแพงเพชร", "เชียงราย", "เชียงใหม่", "ตาก", "นครสวรรค์", "น่าน", "พะเยา", "พิจิตร",
+    "พิษณุโลก", "เพชรบูรณ์", "แพร่", "แม่ฮ่องสอน", "ลำปาง", "ลำพูน", "สุโขทัย", "อุตรดิตถ์",
+    "อุทัยธานี", "กาฬสินธุ์", "ขอนแก่น", "ชัยภูมิ", "นครพนม", "นครราชสีมา", "บึงกาฬ",
+    "บุรีรัมย์", "มหาสารคาม", "มุกดาหาร", "ยโสธร", "ร้อยเอ็ด", "เลย", "ศรีสะเกษ", "สกลนคร",
+    "สุรินทร์", "หนองคาย", "หนองบัวลำภู", "อำนาจเจริญ", "อุดรธานี", "อุบลราชธานี",
+    "กรุงเทพมหานคร", "กาญจนบุรี", "จันทบุรี", "ฉะเชิงเทรา", "ชลบุรี", "ชัยนาท", "ตราด",
+    "นครนายก", "นครปฐม", "นนทบุรี", "ปทุมธานี", "ประจวบคีรีขันธ์", "ปราจีนบุรี",
+    "พระนครศรีอยุธยา", "เพชรบุรี", "ระยอง", "ราชบุรี", "ลพบุรี", "สมุทรปราการ", "สมุทรสงคราม",
+    "สมุทรสาคร", "สระแก้ว", "สระบุรี", "สิงห์บุรี", "สุพรรณบุรี", "อ่างทอง", "กระบี่", "ชุมพร",
+    "ตรัง", "นครศรีธรรมราช", "นราธิวาส", "ปัตตานี", "พังงา", "พัทลุง", "ภูเก็ต", "ยะลา",
+    "ระนอง", "สงขลา", "สตูล", "สุราษฎร์ธานี",
+]
+PROVINCE_MAX_COST_RATIO = 0.25   # ผิดได้ไม่เกิน 25% ของจำนวนพยัญชนะในชื่อจังหวัด
+PROVINCE_MIN_VOTES = 2           # ต้องมีอย่างน้อยกี่รอบที่อ่านออกมาเป็นจังหวัดเดียวกัน
+
+
+def _skeleton(text: str) -> str:
+    """เหลือเฉพาะพยัญชนะไทย (ตัดสระ/วรรณยุกต์/สัญลักษณ์) เพราะ OCR มักผิดที่สระมากที่สุด"""
+    return "".join(ch for ch in text if "\u0e01" <= ch <= "\u0e2e")
+
+
+_PROVINCE_SKELETONS = [(p, _skeleton(p)) for p in THAI_PROVINCES]
+
+
+def _substring_cost(pattern: str, text: str) -> int:
+    """ระยะแก้ไขต่ำสุดระหว่าง pattern กับ 'ส่วนใดส่วนหนึ่ง' ของ text (Sellers)
+    ใช้เพราะผลอ่านมักมีเศษขอบป้ายติดหน้า/ท้าย"""
+    prev = [0] * (len(text) + 1)  # เริ่มต้นตรงไหนของ text ก็ได้ ไม่เสียค่า
+    for i in range(1, len(pattern) + 1):
+        cur = [i] + [0] * len(text)
+        for j in range(1, len(text) + 1):
+            cost = 0 if pattern[i - 1] == text[j - 1] else 1
+            cur[j] = min(prev[j - 1] + cost, prev[j] + 1, cur[j - 1] + 1)
+        prev = cur
+    return min(prev)
+
+
+def match_province(text: str):
+    """คืน (ชื่อจังหวัด, ค่าความคลาดเคลื่อน) ที่ใกล้ที่สุด หรือ (None, None) ถ้าไม่ชัด"""
+    sk = _skeleton(text)
+    if len(sk) < 2:
+        return None, None
+    scored = []
+    for name, psk in _PROVINCE_SKELETONS:
+        if not psk:
+            continue
+        if len(psk) <= 3:
+            # ชื่อสั้น (เช่น ตาก น่าน) ต้องเป็นข้อความเกือบทั้งหมด ไม่ใช่เศษที่บังเอิญอยู่ในคำยาว
+            if psk in sk and len(sk) <= len(psk) + 1:
+                scored.append((0.0, len(psk), name))
+            continue
+        ratio = _substring_cost(psk, sk) / len(psk)
+        if ratio <= PROVINCE_MAX_COST_RATIO:
+            scored.append((ratio, len(psk), name))
+    if not scored:
+        return None, None
+    # เลือกที่คลาดเคลื่อนน้อยสุดก่อน ถ้าเท่ากันเลือกชื่อที่ยาวกว่า (หลักฐานมากกว่า)
+    # (ผลอ่านตรงเป๊ะต้องชนะชื่อยาวที่ "เกือบตรง" เสมอ เช่น เพชรบุรี vs เพชรบูรณ์)
+    scored.sort(key=lambda t: (t[0], -t[1]))
+    return scored[0][2], scored[0][0]
+
+
+def read_province(frame: np.ndarray, box) -> str:
+    """อ่านชื่อจังหวัดจากกรอบป้าย (ทำเฉพาะป้าย 2 บรรทัด) คืน "" ถ้าอ่านไม่ได้/ไม่ชัด"""
+    x, y, w, h = box
+    roi = frame[y:y + h, x:x + w]
+    if h == 0 or (w / float(h)) >= TWO_LINE_ASPECT:
+        return ""
+    H, W = roi.shape[:2]
+    votes = {}
+    for y0, y1, x0, x1 in [(0.55, 0.95, 0.05, 0.95), (0.50, 1.0, 0.0, 1.0)]:
+        c = roi[int(H * y0):int(H * y1), int(W * x0):int(W * x1)]
+        if c.shape[0] < 10 or c.shape[1] < 10:
+            continue
+        gray = cv2.resize(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), None, fx=3, fy=3,
+                          interpolation=cv2.INTER_CUBIC)
+        red = cv2.resize(c[:, :, 2], None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        red_otsu = cv2.threshold(red, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        for variant in (gray, red, red_otsu):
+            text = pytesseract.image_to_string(variant, config=f"--psm 7 -l {OCR_LANG}")
+            name, _ = match_province(text)
+            if name:
+                votes[name] = votes.get(name, 0) + 1
+    if not votes:
+        return ""
+    name, count = max(votes.items(), key=lambda kv: kv[1])
+    return name if count >= PROVINCE_MIN_VOTES else ""
+
+
+# --------------------------------------------------------------------------
 # ฟังก์ชันบันทึกผลลัพธ์ (ภาพ + แถวใน log.csv)
 # --------------------------------------------------------------------------
 def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
@@ -559,6 +659,8 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
 
     annotated, results = process_frame(captured_frame.copy())
     raw_text = results[0][0] if results else ""
+    # จังหวัดจากบรรทัดล่างของป้าย (อ่านจากภาพต้นฉบับ ไม่ใช่ภาพที่วาดกรอบแล้ว)
+    province = read_province(captured_frame, results[0][1]) if results else ""
 
     # เทียบกับทะเบียนที่รู้จัก (ถ้าเปิดใช้) ใช้ทะเบียนที่จับคู่ได้เป็นผลสุดท้าย
     plate_text, match_note = raw_text, ""
@@ -582,7 +684,7 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
         writer = csv.writer(f)
         if is_new_file:
             writer.writerow(["timestamp", "direction", "plate_text", "image_file",
-                             "ocr_raw", "match_note"])
+                             "ocr_raw", "match_note", "province"])
         writer.writerow([
             timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             direction,
@@ -590,6 +692,7 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
             image_filename,
             raw_text,
             match_note,
+            province,
         ])
 
     shown = f"'{plate_text or 'อ่านไม่ได้'}'"
@@ -597,12 +700,14 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
         shown += f" (OCR อ่านได้ '{raw_text}' -> {match_note})"
     elif match_note:
         shown += f" ({match_note})"
+    if province:
+        shown += f" จังหวัด {province}"
     print(f"[{ts_str}] รถ{direction} -> ป้ายทะเบียน: {shown} "
           f"| บันทึกภาพที่: {image_path}")
 
     if uploader is not None:
         uploader.enqueue(timestamp.strftime("%Y-%m-%d %H:%M:%S"), direction,
-                         plate_text, image_path)
+                         plate_text, image_path, province)
 
 
 # --------------------------------------------------------------------------
@@ -817,10 +922,13 @@ def run_on_image(image_path: str, matcher: "PlateMatcher" = None):
         print(f"[ERROR] ไม่พบไฟล์ภาพ: {image_path}")
         return
 
+    frame_original = frame.copy()
     frame, results = process_frame(frame)
 
     for text, box in results:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] อ่านป้ายทะเบียนได้: {text}")
+        province = read_province(frame_original, box)
+        print(f"    จังหวัด: {province or 'อ่านไม่ได้'}")
         if matcher is not None:
             matched, dist, note = matcher.match(text)
             if matched:

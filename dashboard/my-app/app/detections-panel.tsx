@@ -10,6 +10,7 @@ type Detection = {
   detectedAt: string;
   photoFilename: string | null;
   province: string | null;
+  carProvince: string | null;
   matched: boolean;
   ownerName: string | null;
   brand: string | null;
@@ -76,7 +77,20 @@ export default function DetectionsPanel() {
                 </td>
                 <td className="pr-3">{directionLabel[r.direction] ?? r.direction}</td>
                 <td className="pr-3 font-semibold">{r.plate}</td>
-                <td className="pr-3">{r.province ?? "-"}</td>
+                <td className="pr-3">
+                  {r.province ? (
+                    r.province
+                  ) : r.carProvince ? (
+                    <span
+                      className="italic text-slate-400"
+                      title="กล้องอ่านจังหวัดไม่ได้ แสดงจากทะเบียนรถที่ลงไว้"
+                    >
+                      {r.carProvince}
+                    </span>
+                  ) : (
+                    "-"
+                  )}
+                </td>
                 <td className="pr-3">
                   {r.matched ? (
                     <span className="rounded bg-green-100 px-2 py-0.5 text-green-700">ในทะเบียน</span>

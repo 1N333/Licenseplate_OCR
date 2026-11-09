@@ -23,6 +23,7 @@ export type Detection = {
   detectedAt: string;
   photoFilename: string | null;
   province: string | null;
+  carProvince: string | null;
   matched: boolean;
   ownerName: string | null;
   brand: string | null;
@@ -38,6 +39,7 @@ interface DetectionRow extends RowDataPacket {
   detected_at: Date;
   photo_filename: string | null;
   province: string | null;
+  car_province: string | null;
   car_id: string | null;
   owner_name: string | null;
   brand: string | null;
@@ -122,9 +124,14 @@ export function parseDetectionFields(form: FormData): ParsedDetection | string {
   const plate = String(form.get("plate") ?? "").replace(/\s+/g, "").trim();
   if (plate.length < 1 || plate.length > 40) return "Invalid plate text.";
 
-  const rawDirection = String(form.get("direction") ?? "").toLowerCase();
-  const direction =
-    rawDirection === "in" || rawDirection === "out" ? rawDirection : "unknown";
+  // The Pi sends Thai words ("เข้า"/"ออก"); also accept "in"/"out".
+  const rawDirection = String(form.get("direction") ?? "").trim().toLowerCase();
+  const direction: "in" | "out" | "unknown" =
+    rawDirection === "in" || rawDirection === "เข้า"
+      ? "in"
+      : rawDirection === "out" || rawDirection === "ออก"
+        ? "out"
+        : "unknown";
 
   const device = String(form.get("device") ?? "device").trim().slice(0, 60);
   if (!/^[\w.\- ]{1,60}$/.test(device)) return "Invalid device name.";
@@ -202,7 +209,7 @@ export async function listDetections(userId: string, limit = 50): Promise<Detect
   const [rows] = await getDb().execute<DetectionRow[]>(
     `SELECT CAST(p.id AS CHAR) AS id, p.plate_text, p.direction, p.device_id,
             p.detected_at, p.photo_filename, p.province, CAST(p.car_id AS CHAR) AS car_id,
-            c.owner_name, c.brand, c.model, c.color
+            c.owner_name, c.brand, c.model, c.color, c.province AS car_province
      FROM plate_detections p
      LEFT JOIN cars c ON c.id = p.car_id
      WHERE p.user_id = ?
@@ -218,6 +225,7 @@ export async function listDetections(userId: string, limit = 50): Promise<Detect
     detectedAt: r.detected_at.toISOString(),
     photoFilename: r.photo_filename,
     province: r.province,
+    carProvince: r.car_province,
     matched: r.car_id !== null,
     ownerName: r.owner_name,
     brand: r.brand,

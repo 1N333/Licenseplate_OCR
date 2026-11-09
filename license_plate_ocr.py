@@ -351,6 +351,16 @@ def process_frame(frame: np.ndarray):
 # --------------------------------------------------------------------------
 # คลาสเฝ้าดูการเคลื่อนไหว (ตรวจจับรถเข้า/ออกด้วย Background Subtraction)
 # --------------------------------------------------------------------------
+def frame_sharpness(frame: np.ndarray, box) -> float:
+    """ความคมของบริเวณ box (ความแปรปรวนของ Laplacian) ยิ่งสูงยิ่งคม ภาพเบลอจะต่ำมาก"""
+    x, y, w, h = box
+    crop = frame[max(y, 0):y + h, max(x, 0):x + w]
+    if crop.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 class VehicleWatcher:
     """
     เฝ้าดูสตรีมภาพทีละเฟรม ใช้ MOG2 background subtractor หาว่ามีวัตถุขนาดใหญ่
@@ -372,12 +382,16 @@ class VehicleWatcher:
         self.exit_frames = exit_frames
         self._reset()
 
+    KEEP_FRAMES = 3  # เก็บเฟรมที่คมที่สุดไว้กี่เฟรมต่อรถหนึ่งคัน
+
     def _reset(self):
         self.tracking = False
         self.centroids = []
         self.best_frame = None
         self.best_area = 0
         self.frames_since_seen = 0
+        self._candidates = []  # [(คะแนนความคม, เฟรม)] เรียงจากดีไปแย่
+        self.last_candidates = getattr(self, "last_candidates", [])
 
     def _determine_direction(self):
         if len(self.centroids) < 2:
@@ -420,15 +434,25 @@ class VehicleWatcher:
             self.frames_since_seen = 0
             if max_area > self.best_area:
                 self.best_area = max_area
-                self.best_frame = frame.copy()
+            # ให้คะแนนจาก "ความคม" ของบริเวณที่มีวัตถุเคลื่อนไหว (เฟรมที่ป้ายขยับจะเบลอ = คมต่ำ)
+            # เฟรมที่ใหญ่ที่สุดมักเป็นเฟรมที่เคลื่อนไหวเร็วที่สุด จึงไม่ใช่เฟรมที่อ่านง่ายที่สุด
+            score = frame_sharpness(frame, vehicle_box) * (max_area ** 0.5)
+            if (len(self._candidates) < self.KEEP_FRAMES
+                    or score > self._candidates[-1][0]):
+                self._candidates.append((score, frame.copy()))
+                self._candidates.sort(key=lambda t: t[0], reverse=True)
+                del self._candidates[self.KEEP_FRAMES:]
+                self.best_frame = self._candidates[0][1]
             return None, None, None
 
         if self.tracking:
             self.frames_since_seen += 1
             if self.frames_since_seen >= self.exit_frames:
                 direction = self._determine_direction()
-                captured = self.best_frame
+                frames = [f for _, f in self._candidates]
+                captured = frames[0] if frames else self.best_frame
                 self._reset()
+                self.last_candidates = frames  # ให้ผู้เรียกลองอ่านทีละเฟรมจากคมสุดไปหา
                 return "captured", captured, direction
 
         return None, None, None
@@ -651,16 +675,33 @@ def read_province(frame: np.ndarray, box) -> str:
 # --------------------------------------------------------------------------
 # ฟังก์ชันบันทึกผลลัพธ์ (ภาพ + แถวใน log.csv)
 # --------------------------------------------------------------------------
+def read_best_of_frames(frames: list):
+    """ลองอ่านทีละเฟรม (เรียงคมสุดก่อน) คืน (เฟรมที่ใช้, ภาพที่วาดกรอบ, results, จังหวัด)
+    หยุดทันทีเมื่อได้ทั้งป้ายและจังหวัด ถ้าไม่ได้ครบเลย เลือกเฟรมที่ได้ป้าย/จังหวัดมากที่สุด"""
+    best = None
+    for frame in frames:
+        annotated, results = process_frame(frame.copy())
+        province = read_province(frame, results[0][1]) if results else ""
+        rank = (bool(results), bool(province))
+        if best is None or rank > best[0]:
+            best = (rank, frame, annotated, results, province)
+        if rank == (True, True):
+            break
+    _, frame, annotated, results, province = best
+    return frame, annotated, results, province
+
+
 def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
-               uploader: "ServerUploader" = None, matcher: "PlateMatcher" = None):
+               uploader: "ServerUploader" = None, matcher: "PlateMatcher" = None,
+               alt_frames: list = None):
     save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now()
     ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-    annotated, results = process_frame(captured_frame.copy())
+    # alt_frames = เฟรมที่คมที่สุดของรถคันนี้ (เรียงดีไปแย่) ถ้าไม่มีก็ใช้เฟรมเดียว
+    frames = list(alt_frames) if alt_frames else [captured_frame]
+    captured_frame, annotated, results, province = read_best_of_frames(frames)
     raw_text = results[0][0] if results else ""
-    # จังหวัดจากบรรทัดล่างของป้าย (อ่านจากภาพต้นฉบับ ไม่ใช่ภาพที่วาดกรอบแล้ว)
-    province = read_province(captured_frame, results[0][1]) if results else ""
 
     # เทียบกับทะเบียนที่รู้จัก (ถ้าเปิดใช้) ใช้ทะเบียนที่จับคู่ได้เป็นผลสุดท้าย
     plate_text, match_note = raw_text, ""
@@ -1011,7 +1052,8 @@ def run_trigger_mode(source: str, cam_index: int = 0, save_dir: str = "captures"
 
             event, captured_frame, direction = watcher.update(frame)
             if event == "captured":
-                save_event(save_path, captured_frame, direction, uploader, matcher)
+                save_event(save_path, captured_frame, direction, uploader, matcher,
+                           alt_frames=watcher.last_candidates)
 
             if not headless:
                 status = "กำลังติดตามรถ..." if watcher.tracking else "รอรถเข้ามา"

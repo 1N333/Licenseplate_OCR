@@ -22,6 +22,7 @@ export type Detection = {
   device: string;
   detectedAt: string;
   photoFilename: string | null;
+  province: string | null;
   matched: boolean;
   ownerName: string | null;
   brand: string | null;
@@ -36,6 +37,7 @@ interface DetectionRow extends RowDataPacket {
   device_id: string;
   detected_at: Date;
   photo_filename: string | null;
+  province: string | null;
   car_id: string | null;
   owner_name: string | null;
   brand: string | null;
@@ -59,6 +61,7 @@ export async function ensureDetectionsTable(): Promise<void> {
           device_id VARCHAR(60) NOT NULL,
           detected_at DATETIME NOT NULL,
           photo_filename VARCHAR(64) NULL,
+          province VARCHAR(100) NULL,
           car_id BIGINT UNSIGNED NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           INDEX detections_user_time_idx (user_id, detected_at),
@@ -68,6 +71,15 @@ export async function ensureDetectionsTable(): Promise<void> {
             FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE SET NULL
         )
       `);
+      // Tables created before the province feature lack this column: add it once.
+      try {
+        await getDb().query(
+          "ALTER TABLE plate_detections ADD COLUMN province VARCHAR(100) NULL AFTER photo_filename",
+        );
+      } catch (error) {
+        const code = (error as { errno?: number }).errno;
+        if (code !== 1060) throw error; // 1060 = column already exists
+      }
     })();
   }
   try {
@@ -103,6 +115,7 @@ export type ParsedDetection = {
   direction: "in" | "out" | "unknown";
   device: string;
   detectedAt: Date;
+  province: string | null;
 };
 
 export function parseDetectionFields(form: FormData): ParsedDetection | string {
@@ -120,7 +133,10 @@ export function parseDetectionFields(form: FormData): ParsedDetection | string {
   const rawTime = String(form.get("time") ?? "").trim();
   let detectedAt = new Date(rawTime.replace(" ", "T"));
   if (Number.isNaN(detectedAt.getTime())) detectedAt = new Date();
-  return { plate, direction, device, detectedAt };
+  // Province read from the plate's second line (optional, Thai text only).
+  const rawProvince = String(form.get("province") ?? "").trim();
+  const province = /^[\u0E00-\u0E7F ]{2,100}$/.test(rawProvince) ? rawProvince : null;
+  return { plate, direction, device, detectedAt, province };
 }
 
 export async function saveDetectionPhoto(photo: File): Promise<string | null> {
@@ -151,20 +167,32 @@ export async function insertDetection(
   photoFilename: string | null,
 ): Promise<{ id: string; carId: string | null }> {
   const db = getDb();
-  // Match against this account's registry: letters+number, spaces ignored.
-  const [cars] = await db.execute<RowDataPacket[]>(
-    `SELECT CAST(id AS CHAR) AS id FROM cars
+  // Match against this account's registry: letters+number (spaces ignored),
+  // and the province too when the Pi managed to read it.
+  const plateSql = `SELECT CAST(id AS CHAR) AS id FROM cars
      WHERE user_id = ?
-       AND REPLACE(CONCAT(plate_letters, plate_number), ' ', '') = ?
-     ORDER BY id LIMIT 1`,
-    [userId, d.plate],
-  );
-  const carId: string | null = cars[0]?.id ?? null;
+       AND REPLACE(CONCAT(plate_letters, plate_number), ' ', '') = ?`;
+  let carId: string | null = null;
+  if (d.province) {
+    const [exact] = await db.execute<RowDataPacket[]>(
+      `${plateSql} AND province = ? ORDER BY id LIMIT 1`,
+      [userId, d.plate, d.province],
+    );
+    carId = exact[0]?.id ?? null;
+  }
+  if (!carId) {
+    // Province unreadable or different: accept only when exactly one car has this plate.
+    const [any] = await db.execute<RowDataPacket[]>(
+      `${plateSql} ORDER BY id LIMIT 2`,
+      [userId, d.plate],
+    );
+    if (any.length === 1) carId = any[0].id;
+  }
   const [result] = await db.execute<ResultSetHeader>(
     `INSERT INTO plate_detections
-       (user_id, plate_text, direction, device_id, detected_at, photo_filename, car_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [userId, d.plate, d.direction, d.device, d.detectedAt, photoFilename, carId],
+       (user_id, plate_text, direction, device_id, detected_at, photo_filename, province, car_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [userId, d.plate, d.direction, d.device, d.detectedAt, photoFilename, d.province, carId],
   );
   return { id: String(result.insertId), carId };
 }
@@ -173,7 +201,7 @@ export async function listDetections(userId: string, limit = 50): Promise<Detect
   const safeLimit = Math.min(Math.max(Math.trunc(limit) || 50, 1), 200);
   const [rows] = await getDb().execute<DetectionRow[]>(
     `SELECT CAST(p.id AS CHAR) AS id, p.plate_text, p.direction, p.device_id,
-            p.detected_at, p.photo_filename, CAST(p.car_id AS CHAR) AS car_id,
+            p.detected_at, p.photo_filename, p.province, CAST(p.car_id AS CHAR) AS car_id,
             c.owner_name, c.brand, c.model, c.color
      FROM plate_detections p
      LEFT JOIN cars c ON c.id = p.car_id
@@ -189,6 +217,7 @@ export async function listDetections(userId: string, limit = 50): Promise<Detect
     device: r.device_id,
     detectedAt: r.detected_at.toISOString(),
     photoFilename: r.photo_filename,
+    province: r.province,
     matched: r.car_id !== null,
     ownerName: r.owner_name,
     brand: r.brand,

@@ -456,8 +456,8 @@ export default function CarManager({
                     className="w-full rounded-md border border-slate-300 px-3 py-2"
                     name="plateLetters"
                     defaultValue={formCar.plateLetters}
-                    pattern="(?=.*[ก-ฮ])[ก-ฮ0-9]{2}"
-                    maxLength={2}
+                    pattern="(?=.*[ก-ฮ])[ก-ฮ0-9]{1,3}"
+                    maxLength={3}
                     required
                   />
                 </label>

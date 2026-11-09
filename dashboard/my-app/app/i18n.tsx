@@ -71,7 +71,7 @@ const messages = {
   recordNotFound: "ไม่พบข้อมูลรถ",
   duplicatePlate: "ทะเบียนรถนี้มีอยู่ในระบบแล้ว",
   fillAllFields: "กรุณากรอกข้อมูลรถและเจ้าของให้ครบ",
-  invalidPlateCategory: "หมวดอักษรต้องมี 2 ตัว และมีอักษรไทยอย่างน้อย 1 ตัว",
+  invalidPlateCategory: "หมวดอักษรต้องมี 1–3 ตัว และมีอักษรไทยอย่างน้อย 1 ตัว",
   invalidPlateNumber: "เลขทะเบียนต้องเป็นตัวเลข 1–4 หลัก",
   invalidPlate: "รูปแบบป้ายทะเบียนไม่ถูกต้อง",
   invalidPhone: "กรุณากรอกเบอร์โทรเจ้าของให้ถูกต้อง",
@@ -117,7 +117,7 @@ const errorKeys: Record<string, MessageKey> = {
   "This license plate is already registered.": "duplicatePlate",
   "Please fill in all vehicle and owner fields.": "fillAllFields",
   "Invalid license plate format.": "invalidPlate",
-  "Plate category must contain 2 characters including a Thai letter.":
+  "Plate category must contain 1 to 3 characters including a Thai letter.":
     "invalidPlateCategory",
   "Plate number must contain 1 to 4 digits.": "invalidPlateNumber",
   "Enter valid license plate letters.": "invalidPlate",

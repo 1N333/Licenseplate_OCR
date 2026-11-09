@@ -9,6 +9,7 @@ type Detection = {
   device: string;
   detectedAt: string;
   photoFilename: string | null;
+  province: string | null;
   matched: boolean;
   ownerName: string | null;
   brand: string | null;
@@ -60,6 +61,7 @@ export default function DetectionsPanel() {
               <th className="py-2 pr-3">เวลา</th>
               <th className="pr-3">ทิศทาง</th>
               <th className="pr-3">ป้ายทะเบียน</th>
+              <th className="pr-3">จังหวัด</th>
               <th className="pr-3">สถานะ</th>
               <th className="pr-3">เจ้าของ / รถ</th>
               <th className="pr-3">อุปกรณ์</th>
@@ -74,6 +76,7 @@ export default function DetectionsPanel() {
                 </td>
                 <td className="pr-3">{directionLabel[r.direction] ?? r.direction}</td>
                 <td className="pr-3 font-semibold">{r.plate}</td>
+                <td className="pr-3">{r.province ?? "-"}</td>
                 <td className="pr-3">
                   {r.matched ? (
                     <span className="rounded bg-green-100 px-2 py-0.5 text-green-700">ในทะเบียน</span>
@@ -103,7 +106,7 @@ export default function DetectionsPanel() {
             ))}
             {rows.length === 0 && !error && (
               <tr>
-                <td colSpan={7} className="py-6 text-center text-slate-400">
+                <td colSpan={8} className="py-6 text-center text-slate-400">
                   ยังไม่มีข้อมูล
                 </td>
               </tr>

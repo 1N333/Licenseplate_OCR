@@ -104,7 +104,7 @@ export async function parseCarForm(request: Request): Promise<ParsedCarForm> {
   let plateNumber = getText("plateNumber");
   if (submittedPlate) {
     const plateMatch = submittedPlate.match(
-      /^(?:([ก-ฮ0-9]{2})\s*([0-9]{1,4})|([0-9]{1,4})\s*([ก-ฮ0-9]{2}))$/,
+      /^(?:([ก-ฮ0-9]{1,3})\s*([0-9]{1,4})|([0-9]{1,4})\s*([ก-ฮ0-9]{1,3}))$/,
     );
     if (!plateMatch) {
       return {
@@ -134,11 +134,11 @@ export async function parseCarForm(request: Request): Promise<ParsedCarForm> {
     return { ok: false, error: "Please fill in all vehicle and owner fields." };
   }
   if (
-    !/^(?=[ก-ฮ0-9]{2}$)(?=.*[ก-ฮ])[ก-ฮ0-9]{2}$/u.test(car.plateLetters)
+    !/^(?=[ก-ฮ0-9]{1,3}$)(?=.*[ก-ฮ])[ก-ฮ0-9]{1,3}$/u.test(car.plateLetters)
   ) {
     return {
       ok: false,
-      error: "Plate category must contain 2 characters including a Thai letter.",
+      error: "Plate category must contain 1 to 3 characters including a Thai letter.",
     };
   }
   if (!/^\d{1,4}$/.test(car.plateNumber)) {

@@ -42,6 +42,10 @@
 
     # ทดสอบกับไฟล์ภาพนิ่ง
     python3 license_plate_ocr.py --image test.jpg
+    # เทียบกับทะเบียนที่รู้จัก (ยอมให้ผิดตัวที่หน้าตาคล้ายกัน เช่น ฬ/ฟ)
+    python3 license_plate_ocr.py --image test.jpg --lang tha --known-plates known_plates.txt
+    # ป้ายไทย: ให้อ่านเป็นภาษาไทยอย่างเดียว (กัน ฬม ถูกอ่านเป็น Hu)
+    python3 license_plate_ocr.py --image test.jpg --lang tha
 
     # ส่งผลขึ้น dashboard ที่ server (ดู plate_server.py) ทุกครั้งที่มีรถผ่านในโหมด trigger
     python3 license_plate_ocr.py --camera usb --mode trigger \\
@@ -86,6 +90,9 @@ MAX_PLATE_AREA = 60000
 # ขนาดกล่องป้ายเทียบกับพื้นที่ทั้งภาพ (ใช้กับวิธีหาป้ายแบบที่ 2 และ 3)
 REL_MIN_PLATE_AREA = 0.01   # อย่างน้อย 1% ของภาพ
 REL_MAX_PLATE_AREA = 0.60   # ไม่เกิน 60% ของภาพ
+
+# จำนวนป้ายสูงสุดที่รายงานต่อหนึ่งเฟรม (หน้าประตูมักมีรถคันเดียว ตั้งเป็น 1)
+MAX_PLATES_PER_FRAME = 1
 
 # การตัดภาพป้ายก่อน OCR
 EDGE_MARGIN = 0.05            # ตัดขอบป้ายออกด้านละ 5%
@@ -217,21 +224,63 @@ def crop_plate_text_area(roi: np.ndarray) -> np.ndarray:
     return roi[y0:y1, x0:x1]
 
 
+def _ocr_variants(roi: np.ndarray) -> list:
+    """สร้างภาพหลายแบบจาก ROI เดียวกัน (ต่างหน้าต่างตัด/ต่างวิธีทำขาวดำ)
+    เพื่ออ่านหลายรอบแล้วโหวต: การอ่านครั้งเดียวของ Tesseract ภาษาไทยแกว่งง่าย
+    (ฬ ถูกอ่านเป็น ฟ/พ/ฟิม ฯลฯ) แต่ผลที่ออกบ่อยที่สุดมักใกล้เคียงของจริง"""
+    h, w = roi.shape[:2]
+    two_line = (w / float(h)) < TWO_LINE_ASPECT
+    # (บน, ล่าง, ซ้าย, ขวา) เป็นสัดส่วนของกรอบ; ป้าย 2 บรรทัดเอาเฉพาะบรรทัดบน
+    windows = ([(0.05, 0.60, 0.06, 0.94), (0.05, 0.65, 0.05, 0.95)] if two_line
+               else [(0.05, 0.95, 0.05, 0.95)])
+    out = []
+    for y0, y1, x0, x1 in windows:
+        c = roi[int(h * y0):int(h * y1), int(w * x0):int(w * x1)]
+        if c.shape[0] < 10 or c.shape[1] < 10:
+            continue
+        gray = cv2.resize(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), None, fx=3, fy=3,
+                          interpolation=cv2.INTER_CUBIC)
+        # ช่องสีแดง: ตัวหนังสือสีน้ำเงินจะมืดชัด พื้นขาวสว่าง -> คอนทราสต์ดีกว่า gray
+        red = cv2.resize(c[:, :, 2], None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        red_otsu = cv2.threshold(red, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        out += [gray, red, red_otsu]
+    return out
+
+
+def _consensus(reads: list) -> str:
+    """เลือกผลอ่านที่ 'อยู่กลาง' ที่สุด คือผลรวมระยะห่างถึงผลอื่นต่ำสุด"""
+    best_text, best_score = "", None
+    for a in reads:
+        score = sum(plate_distance(a, b) for b in reads)
+        if best_score is None or score < best_score:
+            best_text, best_score = a, score
+    return best_text
+
+
+# เกณฑ์ความเชื่อมั่นของการโหวต: ป้ายจริงอ่านซ้ำแล้วได้ผลตรงกันเกือบทุกรอบ
+# ส่วนกรอบที่ไม่ใช่ป้าย (ประตู ขอบกระดาษ ฯลฯ) มักอ่านได้แค่รอบสองรอบและแต่ละรอบไม่ตรงกัน
+MIN_VALID_READS = 3        # ต้องมีผลอ่านที่ใช้ได้ (>=3 ตัว มีเลข) อย่างน้อยกี่รอบ
+MIN_AGREEMENT = 0.6        # สัดส่วนผลอ่านที่ต้องใกล้เคียงผลโหวต (ระยะห่าง <= AGREE_DIST)
+AGREE_DIST = 0.6
+MAX_PLATE_CHARS = 8        # ป้ายไทยยาวสุดราว 7 ตัว (หมวด 3 + เลข 4)
+
+
 def ocr_plate(roi: np.ndarray) -> str:
-    processed = preprocess_for_ocr(crop_plate_text_area(roi))
-
-    # --psm 7 = ข้อความบรรทัดเดียว (หลังตัดเหลือบรรทัดบนของป้ายแล้ว)
-    text = _clean(pytesseract.image_to_string(processed, config=f"--psm 7 -l {OCR_LANG}"))
-    if len(text) >= 4:
-        return text
-
-    # ถ้าอ่านไม่ได้ ลองโหมดสำรอง (6 = ข้อความเป็นบล็อก, 11 = ข้อความกระจาย)
-    # รับผลเฉพาะที่ยาวพอและมีตัวเลขอย่างน้อย 1 ตัว (ป้ายไทยมีเลขเสมอ) กัน noise
-    for psm in (6, 11):
-        alt = _clean(pytesseract.image_to_string(processed, config=f"--psm {psm} -l {OCR_LANG}"))
-        if len(alt) >= 4 and any(ch.isdigit() for ch in alt):
-            return alt
-    return text
+    """อ่านหลายรอบจากภาพหลายแบบ (psm 7) แล้วโหวตเอาผลกลาง
+    ถ้าผลอ่านไม่ตรงกันพอ/มีน้อยเกินไป คืน "" (ถือว่าอ่านไม่ได้) ดีกว่าส่งข้อความมั่ว"""
+    reads = []
+    for variant in _ocr_variants(roi):
+        text = _clean(pytesseract.image_to_string(variant, config=f"--psm 7 -l {OCR_LANG}"))
+        # ป้ายไทยมีตัวเลขเสมอ และยาวอย่างน้อย 3 ตัว -> ทิ้งผลที่เป็น noise
+        if len(text) >= 3 and any(ch.isdigit() for ch in text):
+            reads.append(text)
+    if len(reads) < MIN_VALID_READS:
+        return ""
+    best = _consensus(reads)
+    agree = sum(1 for r in reads if plate_distance(best, r) <= AGREE_DIST)
+    if len(best) > MAX_PLATE_CHARS or agree / len(reads) < MIN_AGREEMENT:
+        return ""
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -284,11 +333,17 @@ def process_frame(frame: np.ndarray):
 
         if len(text) >= 4:  # กรองผลลัพธ์ที่สั้นเกินไป (มักเป็น noise)
             results.append((text, (x, y, w, h)))
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(
-                frame, text, (x, max(y - 10, 20)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
-            )
+
+    # เก็บเฉพาะป้ายที่ใหญ่ที่สุด (ใกล้กล้องที่สุด) กรอบอื่นมักเป็นวัตถุอื่นที่ถูกอ่านเป็น noise
+    results.sort(key=lambda r: r[1][2] * r[1][3], reverse=True)
+    results = results[:MAX_PLATES_PER_FRAME]
+
+    for text, (x, y, w, h) in results:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(
+            frame, text, (x, max(y - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2
+        )
 
     return frame, results
 
@@ -296,6 +351,16 @@ def process_frame(frame: np.ndarray):
 # --------------------------------------------------------------------------
 # คลาสเฝ้าดูการเคลื่อนไหว (ตรวจจับรถเข้า/ออกด้วย Background Subtraction)
 # --------------------------------------------------------------------------
+def frame_sharpness(frame: np.ndarray, box) -> float:
+    """ความคมของบริเวณ box (ความแปรปรวนของ Laplacian) ยิ่งสูงยิ่งคม ภาพเบลอจะต่ำมาก"""
+    x, y, w, h = box
+    crop = frame[max(y, 0):y + h, max(x, 0):x + w]
+    if crop.size == 0:
+        return 0.0
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
 class VehicleWatcher:
     """
     เฝ้าดูสตรีมภาพทีละเฟรม ใช้ MOG2 background subtractor หาว่ามีวัตถุขนาดใหญ่
@@ -317,12 +382,16 @@ class VehicleWatcher:
         self.exit_frames = exit_frames
         self._reset()
 
+    KEEP_FRAMES = 3  # เก็บเฟรมที่คมที่สุดไว้กี่เฟรมต่อรถหนึ่งคัน
+
     def _reset(self):
         self.tracking = False
         self.centroids = []
         self.best_frame = None
         self.best_area = 0
         self.frames_since_seen = 0
+        self._candidates = []  # [(คะแนนความคม, เฟรม)] เรียงจากดีไปแย่
+        self.last_candidates = getattr(self, "last_candidates", [])
 
     def _determine_direction(self):
         if len(self.centroids) < 2:
@@ -365,15 +434,25 @@ class VehicleWatcher:
             self.frames_since_seen = 0
             if max_area > self.best_area:
                 self.best_area = max_area
-                self.best_frame = frame.copy()
+            # ให้คะแนนจาก "ความคม" ของบริเวณที่มีวัตถุเคลื่อนไหว (เฟรมที่ป้ายขยับจะเบลอ = คมต่ำ)
+            # เฟรมที่ใหญ่ที่สุดมักเป็นเฟรมที่เคลื่อนไหวเร็วที่สุด จึงไม่ใช่เฟรมที่อ่านง่ายที่สุด
+            score = frame_sharpness(frame, vehicle_box) * (max_area ** 0.5)
+            if (len(self._candidates) < self.KEEP_FRAMES
+                    or score > self._candidates[-1][0]):
+                self._candidates.append((score, frame.copy()))
+                self._candidates.sort(key=lambda t: t[0], reverse=True)
+                del self._candidates[self.KEEP_FRAMES:]
+                self.best_frame = self._candidates[0][1]
             return None, None, None
 
         if self.tracking:
             self.frames_since_seen += 1
             if self.frames_since_seen >= self.exit_frames:
                 direction = self._determine_direction()
-                captured = self.best_frame
+                frames = [f for _, f in self._candidates]
+                captured = frames[0] if frames else self.best_frame
                 self._reset()
+                self.last_candidates = frames  # ให้ผู้เรียกลองอ่านทีละเฟรมจากคมสุดไปหา
                 return "captured", captured, direction
 
         return None, None, None
@@ -390,13 +469,18 @@ class ServerUploader:
       สูงสุด 60 วินาที คิวเก็บอยู่ในไฟล์ จึงไม่หายแม้ปิดเครื่อง/รีสตาร์ต
     """
 
-    def __init__(self, server_url: str, api_key: str, device_id: str, queue_db: Path):
+    def __init__(self, server_url: str, api_key: str, device_id: str, queue_db: Path,
+                 path: str = "/api/plates", send_unreadable: bool = False,
+                 dedupe_seconds: float = 30.0):
+        self.send_unreadable = send_unreadable
+        self.dedupe_seconds = dedupe_seconds
+        self._last_sent = {}  # plate -> เวลา (monotonic) ที่คิวล่าสุด
         try:
             import requests  # นำเข้าตอนใช้งานจริงเท่านั้น
         except ImportError as exc:
             raise RuntimeError("ต้องติดตั้ง requests ก่อน: pip install requests") from exc
         self._requests = requests
-        self.url = server_url.rstrip("/") + "/api/plates"
+        self.url = server_url.rstrip("/") + "/" + path.lstrip("/")
         self.api_key = api_key
         self.device_id = device_id
         queue_db.parent.mkdir(parents=True, exist_ok=True)
@@ -413,9 +497,21 @@ class ServerUploader:
         # เปิดการเชื่อมต่อใหม่ทุกครั้ง เพราะ sqlite3 ห้ามข้ามเธรด
         return sqlite3.connect(self.db_path)
 
-    def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path):
+    def enqueue(self, timestamp: str, direction: str, plate_text: str, image_path: Path,
+                province: str = ""):
+        if not plate_text and not self.send_unreadable:
+            return  # อ่านไม่ได้ -> ไม่ส่งขึ้น dashboard (ยังบันทึกใน log.csv/ภาพในเครื่อง)
+        now = time.monotonic()
+        if plate_text and self.dedupe_seconds > 0:
+            key = (plate_text, province)
+            last = self._last_sent.get(key)
+            if last is not None and now - last < self.dedupe_seconds:
+                return  # ป้ายเดิมเพิ่งส่งไป ไม่ส่งซ้ำ
+            self._last_sent[key] = now
         payload = {"time": timestamp, "direction": direction,
-                   "plate": plate_text, "device": self.device_id}
+                   "plate": plate_text or "UNREADABLE", "device": self.device_id}
+        if province:
+            payload["province"] = province
         with self._conn() as c:
             c.execute("INSERT INTO queue (payload, image_path) VALUES (?, ?)",
                       (json.dumps(payload, ensure_ascii=False), str(image_path)))
@@ -454,6 +550,13 @@ class ServerUploader:
             try:
                 self._send(json.loads(payload), image_path)
             except Exception as exc:  # เน็ตหลุด/server ผิดพลาด -> เก็บคิวไว้ ลองใหม่
+                resp = getattr(exc, "response", None)
+                if resp is not None and resp.status_code in (400, 413, 422):
+                    # server ปฏิเสธข้อมูลนี้ถาวร (ส่งซ้ำก็ไม่ผ่าน) -> ทิ้ง ไม่ให้คิวค้างทั้งแถว
+                    print(f"[WARN] server ปฏิเสธรายการนี้ ({resp.status_code}) ข้ามไป")
+                    with self._conn() as c:
+                        c.execute("DELETE FROM queue WHERE id = ?", (row_id,))
+                    continue
                 print(f"[WARN] ส่งขึ้น server ไม่สำเร็จ ({exc.__class__.__name__}) "
                       f"คิวค้าง {self.pending()} รายการ จะลองใหม่ใน {backoff} วินาที")
                 self._stop.wait(backoff)
@@ -477,16 +580,140 @@ class ServerUploader:
 
 
 # --------------------------------------------------------------------------
+# อ่านจังหวัดจากบรรทัดล่างของป้าย (ป้ายไทย 2 บรรทัด) แล้วจับคู่กับรายชื่อ 77 จังหวัด
+# --------------------------------------------------------------------------
+THAI_PROVINCES = [
+    "กำแพงเพชร", "เชียงราย", "เชียงใหม่", "ตาก", "นครสวรรค์", "น่าน", "พะเยา", "พิจิตร",
+    "พิษณุโลก", "เพชรบูรณ์", "แพร่", "แม่ฮ่องสอน", "ลำปาง", "ลำพูน", "สุโขทัย", "อุตรดิตถ์",
+    "อุทัยธานี", "กาฬสินธุ์", "ขอนแก่น", "ชัยภูมิ", "นครพนม", "นครราชสีมา", "บึงกาฬ",
+    "บุรีรัมย์", "มหาสารคาม", "มุกดาหาร", "ยโสธร", "ร้อยเอ็ด", "เลย", "ศรีสะเกษ", "สกลนคร",
+    "สุรินทร์", "หนองคาย", "หนองบัวลำภู", "อำนาจเจริญ", "อุดรธานี", "อุบลราชธานี",
+    "กรุงเทพมหานคร", "กาญจนบุรี", "จันทบุรี", "ฉะเชิงเทรา", "ชลบุรี", "ชัยนาท", "ตราด",
+    "นครนายก", "นครปฐม", "นนทบุรี", "ปทุมธานี", "ประจวบคีรีขันธ์", "ปราจีนบุรี",
+    "พระนครศรีอยุธยา", "เพชรบุรี", "ระยอง", "ราชบุรี", "ลพบุรี", "สมุทรปราการ", "สมุทรสงคราม",
+    "สมุทรสาคร", "สระแก้ว", "สระบุรี", "สิงห์บุรี", "สุพรรณบุรี", "อ่างทอง", "กระบี่", "ชุมพร",
+    "ตรัง", "นครศรีธรรมราช", "นราธิวาส", "ปัตตานี", "พังงา", "พัทลุง", "ภูเก็ต", "ยะลา",
+    "ระนอง", "สงขลา", "สตูล", "สุราษฎร์ธานี",
+]
+PROVINCE_MAX_COST_RATIO = 0.25   # ผิดได้ไม่เกิน 25% ของจำนวนพยัญชนะในชื่อจังหวัด
+PROVINCE_MIN_VOTES = 2           # ต้องมีอย่างน้อยกี่รอบที่อ่านออกมาเป็นจังหวัดเดียวกัน
+
+
+def _skeleton(text: str) -> str:
+    """เหลือเฉพาะพยัญชนะไทย (ตัดสระ/วรรณยุกต์/สัญลักษณ์) เพราะ OCR มักผิดที่สระมากที่สุด"""
+    return "".join(ch for ch in text if "\u0e01" <= ch <= "\u0e2e")
+
+
+_PROVINCE_SKELETONS = [(p, _skeleton(p)) for p in THAI_PROVINCES]
+
+
+def _substring_cost(pattern: str, text: str) -> int:
+    """ระยะแก้ไขต่ำสุดระหว่าง pattern กับ 'ส่วนใดส่วนหนึ่ง' ของ text (Sellers)
+    ใช้เพราะผลอ่านมักมีเศษขอบป้ายติดหน้า/ท้าย"""
+    prev = [0] * (len(text) + 1)  # เริ่มต้นตรงไหนของ text ก็ได้ ไม่เสียค่า
+    for i in range(1, len(pattern) + 1):
+        cur = [i] + [0] * len(text)
+        for j in range(1, len(text) + 1):
+            cost = 0 if pattern[i - 1] == text[j - 1] else 1
+            cur[j] = min(prev[j - 1] + cost, prev[j] + 1, cur[j - 1] + 1)
+        prev = cur
+    return min(prev)
+
+
+def match_province(text: str):
+    """คืน (ชื่อจังหวัด, ค่าความคลาดเคลื่อน) ที่ใกล้ที่สุด หรือ (None, None) ถ้าไม่ชัด"""
+    sk = _skeleton(text)
+    if len(sk) < 2:
+        return None, None
+    scored = []
+    for name, psk in _PROVINCE_SKELETONS:
+        if not psk:
+            continue
+        if len(psk) <= 3:
+            # ชื่อสั้น (เช่น ตาก น่าน) ต้องเป็นข้อความเกือบทั้งหมด ไม่ใช่เศษที่บังเอิญอยู่ในคำยาว
+            if psk in sk and len(sk) <= len(psk) + 1:
+                scored.append((0.0, len(psk), name))
+            continue
+        ratio = _substring_cost(psk, sk) / len(psk)
+        if ratio <= PROVINCE_MAX_COST_RATIO:
+            scored.append((ratio, len(psk), name))
+    if not scored:
+        return None, None
+    # เลือกที่คลาดเคลื่อนน้อยสุดก่อน ถ้าเท่ากันเลือกชื่อที่ยาวกว่า (หลักฐานมากกว่า)
+    # (ผลอ่านตรงเป๊ะต้องชนะชื่อยาวที่ "เกือบตรง" เสมอ เช่น เพชรบุรี vs เพชรบูรณ์)
+    scored.sort(key=lambda t: (t[0], -t[1]))
+    return scored[0][2], scored[0][0]
+
+
+def read_province(frame: np.ndarray, box) -> str:
+    """อ่านชื่อจังหวัดจากกรอบป้าย (ทำเฉพาะป้าย 2 บรรทัด) คืน "" ถ้าอ่านไม่ได้/ไม่ชัด"""
+    x, y, w, h = box
+    roi = frame[y:y + h, x:x + w]
+    if h == 0 or (w / float(h)) >= TWO_LINE_ASPECT:
+        return ""
+    H, W = roi.shape[:2]
+    votes = {}
+    for y0, y1, x0, x1 in [(0.55, 0.95, 0.05, 0.95), (0.50, 1.0, 0.0, 1.0)]:
+        c = roi[int(H * y0):int(H * y1), int(W * x0):int(W * x1)]
+        if c.shape[0] < 10 or c.shape[1] < 10:
+            continue
+        gray = cv2.resize(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), None, fx=3, fy=3,
+                          interpolation=cv2.INTER_CUBIC)
+        red = cv2.resize(c[:, :, 2], None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        red_otsu = cv2.threshold(red, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        for variant in (gray, red, red_otsu):
+            text = pytesseract.image_to_string(variant, config=f"--psm 7 -l {OCR_LANG}")
+            name, _ = match_province(text)
+            if name:
+                votes[name] = votes.get(name, 0) + 1
+    if not votes:
+        return ""
+    name, count = max(votes.items(), key=lambda kv: kv[1])
+    return name if count >= PROVINCE_MIN_VOTES else ""
+
+
+# --------------------------------------------------------------------------
 # ฟังก์ชันบันทึกผลลัพธ์ (ภาพ + แถวใน log.csv)
 # --------------------------------------------------------------------------
+def read_best_of_frames(frames: list):
+    """ลองอ่านทีละเฟรม (เรียงคมสุดก่อน) คืน (เฟรมที่ใช้, ภาพที่วาดกรอบ, results, จังหวัด)
+    หยุดทันทีเมื่อได้ทั้งป้ายและจังหวัด ถ้าไม่ได้ครบเลย เลือกเฟรมที่ได้ป้าย/จังหวัดมากที่สุด"""
+    best = None
+    for frame in frames:
+        annotated, results = process_frame(frame.copy())
+        province = read_province(frame, results[0][1]) if results else ""
+        rank = (bool(results), bool(province))
+        if best is None or rank > best[0]:
+            best = (rank, frame, annotated, results, province)
+        if rank == (True, True):
+            break
+    _, frame, annotated, results, province = best
+    return frame, annotated, results, province
+
+
 def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
-               uploader: "ServerUploader" = None):
+               uploader: "ServerUploader" = None, matcher: "PlateMatcher" = None,
+               alt_frames: list = None):
     save_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now()
     ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
 
-    annotated, results = process_frame(captured_frame.copy())
-    plate_text = results[0][0] if results else ""
+    # alt_frames = เฟรมที่คมที่สุดของรถคันนี้ (เรียงดีไปแย่) ถ้าไม่มีก็ใช้เฟรมเดียว
+    frames = list(alt_frames) if alt_frames else [captured_frame]
+    captured_frame, annotated, results, province = read_best_of_frames(frames)
+    raw_text = results[0][0] if results else ""
+
+    # เทียบกับทะเบียนที่รู้จัก (ถ้าเปิดใช้) ใช้ทะเบียนที่จับคู่ได้เป็นผลสุดท้าย
+    plate_text, match_note = raw_text, ""
+    if matcher is not None and raw_text:
+        matched, dist, note = matcher.match(raw_text)
+        if matched:
+            plate_text = matched
+            match_note = "ตรง" if dist == 0 else f"ใกล้เคียง({dist:.1f})"
+            if note:
+                match_note += f" {note}"
+        elif note == "กำกวม":
+            match_note = "กำกวม"
 
     image_filename = f"{ts_str}_{direction}_{plate_text or 'unknown'}.jpg"
     image_path = save_dir / image_filename
@@ -497,20 +724,97 @@ def save_event(save_dir: Path, captured_frame: np.ndarray, direction: str,
     with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
         if is_new_file:
-            writer.writerow(["timestamp", "direction", "plate_text", "image_file"])
+            writer.writerow(["timestamp", "direction", "plate_text", "image_file",
+                             "ocr_raw", "match_note", "province"])
         writer.writerow([
             timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             direction,
             plate_text,
             image_filename,
+            raw_text,
+            match_note,
+            province,
         ])
 
-    print(f"[{ts_str}] รถ{direction} -> ป้ายทะเบียน: '{plate_text or 'อ่านไม่ได้'}' "
+    shown = f"'{plate_text or 'อ่านไม่ได้'}'"
+    if raw_text and plate_text != raw_text:
+        shown += f" (OCR อ่านได้ '{raw_text}' -> {match_note})"
+    elif match_note:
+        shown += f" ({match_note})"
+    if province:
+        shown += f" จังหวัด {province}"
+    print(f"[{ts_str}] รถ{direction} -> ป้ายทะเบียน: {shown} "
           f"| บันทึกภาพที่: {image_path}")
 
     if uploader is not None:
         uploader.enqueue(timestamp.strftime("%Y-%m-%d %H:%M:%S"), direction,
-                         plate_text, image_path)
+                         plate_text, image_path, province)
+
+
+# --------------------------------------------------------------------------
+# เทียบผล OCR กับทะเบียนที่รู้จัก (ยอมให้ผิดตัวที่หน้าตาคล้ายกัน เช่น ฬ/ฟ)
+# --------------------------------------------------------------------------
+# กลุ่มตัวอักษรที่ OCR มักอ่านสลับกัน: สลับกันในกลุ่มเดียวกันนับเป็น "ผิดเล็กน้อย"
+CONFUSABLE_GROUPS = ["ฬฟพ", "ผฝ", "ขฃ", "ชซ", "ดคต", "ถภ", "บป", "วร", "มฆ",
+                     "ลส", "ฎฏ", "ยษ", "จฉ", "นห", "0O", "1Il", "2Z", "5S", "8B", "6G"]
+_CONFUSABLE = {}
+for _g in CONFUSABLE_GROUPS:
+    for _a in _g:
+        for _b in _g:
+            if _a != _b:
+                _CONFUSABLE[(_a, _b)] = 0.3
+
+
+def plate_distance(a: str, b: str) -> float:
+    """ระยะห่างระหว่างข้อความสองชุด (Levenshtein แบบถ่วงน้ำหนัก)
+    แทนที่ตัวที่หน้าตาคล้ายกัน = 0.3, แทนที่ตัวอื่น/เพิ่ม/ลบ = 1.0"""
+    n, m = len(a), len(b)
+    prev = [float(j) for j in range(m + 1)]
+    for i in range(1, n + 1):
+        cur = [float(i)] + [0.0] * m
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                sub = 0.0
+            else:
+                sub = _CONFUSABLE.get((a[i - 1], b[j - 1]), 1.0)
+            cur[j] = min(prev[j] + 1.0, cur[j - 1] + 1.0, prev[j - 1] + sub)
+        prev = cur
+    return prev[m]
+
+
+class PlateMatcher:
+    """เทียบข้อความที่ OCR อ่านได้กับรายการทะเบียนที่รู้จัก (ไฟล์ข้อความ บรรทัดละ 1 ทะเบียน
+    ใส่ชื่อ/หมายเหตุต่อท้ายหลังเครื่องหมาย , ได้ เช่น  ฬม99,รถผู้อำนวยการ)
+
+    คืนค่าทะเบียนที่ใกล้เคียงที่สุด ถ้าระยะห่าง <= threshold และชัดเจนกว่าตัวเลือกอื่น
+    (ถ้ามีหลายทะเบียนใกล้เคียงพอๆ กัน ถือว่า "กำกวม" ไม่เลือกให้)"""
+
+    def __init__(self, path, threshold=0.9, margin=0.3):
+        self.threshold = threshold
+        self.margin = margin
+        self.plates = []      # [(ทะเบียน, หมายเหตุ)]
+        with open(path, encoding="utf-8-sig") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                plate, _, note = line.partition(",")
+                plate = _clean(plate.replace(" ", ""))
+                if plate:
+                    self.plates.append((plate, note.strip()))
+
+    def match(self, text: str):
+        """คืน (ทะเบียนที่จับคู่ได้ หรือ None, ระยะห่าง, หมายเหตุ)"""
+        text = _clean(text.replace(" ", ""))
+        if not text or not self.plates:
+            return None, None, ""
+        scored = sorted((plate_distance(text, p), p, note) for p, note in self.plates)
+        best = scored[0]
+        if best[0] > self.threshold:
+            return None, best[0], ""
+        if len(scored) > 1 and scored[1][0] <= self.threshold and scored[1][0] - best[0] < self.margin:
+            return None, best[0], "กำกวม"
+        return best[1], best[0], best[2]
 
 
 # --------------------------------------------------------------------------
@@ -653,16 +957,28 @@ def open_camera(source: str, cam_index: int = 0):
 # --------------------------------------------------------------------------
 # โหมดที่ 1: อ่านจากไฟล์ภาพนิ่ง
 # --------------------------------------------------------------------------
-def run_on_image(image_path: str):
+def run_on_image(image_path: str, matcher: "PlateMatcher" = None):
     frame = cv2.imread(image_path)
     if frame is None:
         print(f"[ERROR] ไม่พบไฟล์ภาพ: {image_path}")
         return
 
+    frame_original = frame.copy()
     frame, results = process_frame(frame)
 
     for text, box in results:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] อ่านป้ายทะเบียนได้: {text}")
+        province = read_province(frame_original, box)
+        print(f"    จังหวัด: {province or 'อ่านไม่ได้'}")
+        if matcher is not None:
+            matched, dist, note = matcher.match(text)
+            if matched:
+                print(f"    -> จับคู่กับทะเบียนที่รู้จัก: {matched}"
+                      f"{' (' + note + ')' if note else ''} ระยะห่าง {dist:.1f}")
+            elif note == "กำกวม":
+                print("    -> ใกล้เคียงหลายทะเบียนพอๆ กัน เลือกให้ไม่ได้")
+            else:
+                print("    -> ไม่ตรงกับทะเบียนใดในรายการ")
 
     out_path = "plate_result.jpg"
     cv2.imwrite(out_path, frame)
@@ -716,7 +1032,8 @@ def run_live_mode(source: str, cam_index: int = 0, headless: bool = False,
 # --------------------------------------------------------------------------
 def run_trigger_mode(source: str, cam_index: int = 0, save_dir: str = "captures",
                       min_area: int = MIN_VEHICLE_AREA, headless: bool = False,
-                      max_frames: int = None, uploader: "ServerUploader" = None):
+                      max_frames: int = None, uploader: "ServerUploader" = None,
+                      matcher: "PlateMatcher" = None):
     read_frame, release = open_camera(source, cam_index)
     watcher = VehicleWatcher(min_area=min_area)
     save_path = Path(save_dir)
@@ -735,7 +1052,8 @@ def run_trigger_mode(source: str, cam_index: int = 0, save_dir: str = "captures"
 
             event, captured_frame, direction = watcher.update(frame)
             if event == "captured":
-                save_event(save_path, captured_frame, direction, uploader)
+                save_event(save_path, captured_frame, direction, uploader, matcher,
+                           alt_frames=watcher.last_candidates)
 
             if not headless:
                 status = "กำลังติดตามรถ..." if watcher.tracking else "รอรถเข้ามา"
@@ -799,6 +1117,21 @@ def main():
         help="จำกัดจำนวนเฟรมแล้วหยุดอัตโนมัติ (มีประโยชน์เวลาเทสด้วย --camera sim)"
     )
     parser.add_argument(
+        "--lang", type=str, default=os.environ.get("PLATE_OCR_LANG", OCR_LANG),
+        help="ภาษา OCR ของ Tesseract: tha = ไทยอย่างเดียว (แนะนำสำหรับป้ายไทย ไม่ถูกอ่านเป็นตัวอังกฤษ), "
+             "tha+eng = ไทยและอังกฤษ (ค่าเริ่มต้น), eng = อังกฤษ (หรือกำหนดด้วยตัวแปร PLATE_OCR_LANG)"
+    )
+    parser.add_argument(
+        "--known-plates", type=str, default=os.environ.get("PLATE_KNOWN_FILE"),
+        help="ไฟล์รายชื่อทะเบียนที่รู้จัก (บรรทัดละ 1 ทะเบียน, ใส่หมายเหตุหลัง , ได้) "
+             "ถ้าระบุ จะเทียบผล OCR กับรายการนี้แบบยอมให้ผิดตัวที่หน้าตาคล้ายกัน (เช่น ฬ/ฟ)"
+    )
+    parser.add_argument(
+        "--match-threshold", type=float, default=0.9,
+        help="ระยะห่างสูงสุดที่ยอมให้จับคู่ (สลับตัวหน้าตาคล้าย = 0.3, ผิดตัวอื่น/ขาด/เกิน = 1.0) "
+             "ค่าเริ่มต้น 0.9; ตั้งต่ำลง = เข้มงวดขึ้น"
+    )
+    parser.add_argument(
         "--server-url", type=str, default=os.environ.get("PLATE_SERVER_URL"),
         help="URL ของ server dashboard เช่น http://192.168.1.50:8000 (ไม่ใส่ = ไม่ส่งขึ้น server)"
     )
@@ -810,20 +1143,41 @@ def main():
         "--device-id", type=str, default=os.environ.get("PLATE_DEVICE_ID", "gate-01"),
         help="ชื่ออุปกรณ์/จุดติดตั้ง แสดงบน dashboard (ค่าเริ่มต้น gate-01)"
     )
+    parser.add_argument(
+        "--server-path", type=str, default=os.environ.get("PLATE_SERVER_PATH", "/api/plates"),
+        help="path ของ API บน server: dashboard Next.js (CRUD_Project) ใช้ /api/detections, "
+             "plate_server.py ใช้ /api/plates (ค่าเริ่มต้น)"
+    )
+    parser.add_argument(
+        "--upload-unreadable", action="store_true",
+        help="ส่งรายการที่อ่านป้ายไม่ได้ขึ้น dashboard ด้วย (ปกติไม่ส่ง)"
+    )
+    parser.add_argument(
+        "--dedupe-seconds", type=float, default=30.0,
+        help="ไม่ส่งป้ายเดิมซ้ำภายในกี่วินาที (ค่าเริ่มต้น 30; 0 = ส่งทุกครั้ง)"
+    )
     args = parser.parse_args()
 
+    globals()["OCR_LANG"] = args.lang  # ให้ฟังก์ชัน OCR ใช้ภาษาที่เลือก
+
+    matcher = None
+    if args.known_plates:
+        matcher = PlateMatcher(args.known_plates, threshold=args.match_threshold)
+        print(f"[INFO] โหลดทะเบียนที่รู้จัก {len(matcher.plates)} รายการจาก {args.known_plates}")
+
     if args.image:
-        run_on_image(args.image)
+        run_on_image(args.image, matcher)
     elif args.camera and args.mode == "live":
         run_live_mode(args.camera, args.cam_index, args.headless, args.max_frames)
     elif args.camera and args.mode == "trigger":
         uploader = None
         if args.server_url:
             uploader = ServerUploader(args.server_url, args.api_key, args.device_id,
-                                      Path(args.save_dir) / "upload_queue.db")
+                                      Path(args.save_dir) / "upload_queue.db", args.server_path,
+                                      args.upload_unreadable, args.dedupe_seconds)
             print(f"[INFO] จะส่งผลขึ้น server: {args.server_url} (อุปกรณ์: {args.device_id})")
         run_trigger_mode(args.camera, args.cam_index, args.save_dir, args.min_area,
-                          args.headless, args.max_frames, uploader)
+                          args.headless, args.max_frames, uploader, matcher)
     else:
         parser.print_help()
 

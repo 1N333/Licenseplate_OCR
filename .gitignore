@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+captures/
+server_data/
+*.db
+.env
+known_plates.txt
+node_modules/
+.next/
+dashboard/my-app/data/uploads/
+dashboard/my-app/.env
+dashboard/my-app/.env.local

@@ -1,0 +1,36 @@
+CREATE TABLE IF NOT EXISTS auth_users (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(254) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  token_hash CHAR(64) NOT NULL PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  expires_at DATETIME NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX auth_sessions_user_id_idx (user_id),
+  CONSTRAINT auth_sessions_user_id_fk
+    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS cars (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  plate_letters VARCHAR(20) NOT NULL,
+  plate_number VARCHAR(10) NOT NULL,
+  province VARCHAR(100) NOT NULL,
+  owner_name VARCHAR(150) NOT NULL,
+  owner_phone VARCHAR(30) NOT NULL,
+  brand VARCHAR(100) NOT NULL,
+  model VARCHAR(100) NOT NULL,
+  color VARCHAR(50) NOT NULL,
+  photo_filename VARCHAR(64) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY cars_user_plate_unique (user_id, plate_letters, plate_number, province),
+  INDEX cars_user_id_idx (user_id),
+  CONSTRAINT cars_user_id_fk
+    FOREIGN KEY (user_id) REFERENCES auth_users(id) ON DELETE CASCADE
+);

@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "set-role": "node --env-file=.env scripts/set-role.mjs"
   },
   "dependencies": {
     "mysql2": "^3.24.6",

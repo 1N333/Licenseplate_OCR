@@ -1,5 +1,7 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+For end-user instructions in Thai, see the [user guide](./USER_GUIDE.md).
+
 ## Getting Started
 
 First, run the development server:
@@ -44,17 +46,23 @@ The shareable table definitions are in [`database/schema.sql`](./database/schema
 
 ## Authentication
 
-Open the app and choose **Sign up** to create an account, then use the same email and password to log in. Passwords must be at least 8 characters and are stored as scrypt hashes. User and session tables are created automatically in MySQL when authentication is first used.
+Public account registration is disabled. Existing accounts continue to sign in with their email and password. On first startup, existing accounts receive the `guard` role by default; an authorized operator can assign an existing account to `office` or `guard` from this directory:
+
+```powershell
+npm run set-role -- user@example.com office
+```
+
+Use `guard` instead of `office` for security staff. The command only changes the role of an existing account; it does not create accounts. Roles are enforced by the API as well as the interface. Office accounts can create, view, update, and delete their own vehicle records. Guard accounts can view the dashboard and detection history only.
 
 ## Vehicle records
 
-After signing in, add, view, edit, search, or delete vehicle records. Each record includes license plate category, number and province, owner name and phone, vehicle brand, model and color, and an optional car photo (JPEG, PNG, or WebP up to 5 MB). The province selector groups all 77 provinces into Northern, Northeastern, Central (including Eastern and Western provinces), and Southern regions. Colors are grouped into neutral, vibrant, dark, earth-tone, pastel, and metallic categories. Brand and model fields provide searchable suggestions from the listed Japanese, Chinese, European, American, and Korean makes; both fields still accept custom text. Records and photos are limited to the signed-in account. Photos are stored locally under `data/uploads/cars` and are excluded from Git; include this folder in backups. For a multi-instance or hosted deployment, configure shared persistent file storage before using photo uploads.
+Office staff can add, view, edit, search, or delete vehicle records. Each record includes license plate category, number and province, owner name and phone, vehicle brand, model and color, and an optional car photo (JPEG, PNG, or WebP up to 5 MB). The province selector groups all 77 provinces into Northern, Northeastern, Central (including Eastern and Western provinces), and Southern regions. Colors are grouped into neutral, vibrant, dark, earth-tone, pastel, and metallic categories. Brand and model fields provide searchable suggestions from the listed Japanese, Chinese, European, American, and Korean makes; both fields still accept custom text. Records and photos are limited to the signed-in office account. Photos are stored locally under `data/uploads/cars` and are excluded from Git; include this folder in backups. For a multi-instance or hosted deployment, configure shared persistent file storage before using photo uploads.
 
 ## License plate entry and exit detections
 
-The dashboard displays recent vehicle detections reported by a Raspberry Pi and refreshes the list every five seconds. To enable ingestion, set `PLATE_API_KEY` to a random secret of at least 16 characters and set `PLATE_OWNER_EMAIL` to an email registered in the app, then restart Next.js. The first request creates the detections table automatically.
+The dashboard displays vehicle detections reported by a Raspberry Pi and refreshes the newest page every five seconds. The history is sorted newest first and paginated at 10 events per page. Both roles can view this shared detection history. To enable ingestion and match plates against the office account's vehicle records, set `PLATE_API_KEY` to a random secret of at least 16 characters and set `PLATE_OWNER_EMAIL` to the office account's email, then restart Next.js. The first request creates the detections table automatically.
 
-Send multipart form data to `POST /api/detections` with the `X-API-Key` header and `plate`, `direction` (`in`/`out` or `เข้า`/`ออก`), and `device` fields. The optional `time`, `province`, and `image` fields are also accepted; images must be JPEG or PNG and no larger than 5 MB. Detection records belong to the configured account and are matched only against that account's vehicle records. The signed-in dashboard reads the latest records from `GET /api/detections`.
+Send multipart form data to `POST /api/detections` with the `X-API-Key` header and `plate`, `direction` (`in`/`out` or `เข้า`/`ออก`), and `device` fields. The optional `time`, `province`, and `image` fields are also accepted; images must be JPEG or PNG and no larger than 5 MB. Detection records belong to the configured account and are matched against that account's vehicle records. Signed-in dashboards read the history from `GET /api/detections`.
 
 ## Learn More
 

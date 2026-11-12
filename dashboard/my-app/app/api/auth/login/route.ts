@@ -5,11 +5,13 @@ import {
   ensureAuthTables,
   readCredentials,
   verifyPassword,
+  type UserRole,
 } from "@/lib/auth";
 
 interface LoginUserRow extends RowDataPacket {
   id: string;
   password_hash: string;
+  role: UserRole;
 }
 
 export async function POST(request: Request) {
@@ -24,7 +26,7 @@ export async function POST(request: Request) {
   try {
     await ensureAuthTables();
     const [users] = await getDb().execute<LoginUserRow[]>(
-      "SELECT CAST(id AS CHAR) AS id, password_hash FROM auth_users WHERE email = ? LIMIT 1",
+      "SELECT CAST(id AS CHAR) AS id, password_hash, role FROM auth_users WHERE email = ? LIMIT 1",
       [credentials.email],
     );
     const user = users[0];
@@ -36,7 +38,9 @@ export async function POST(request: Request) {
     }
 
     await createSession(user.id);
-    return Response.json({ user: { email: credentials.email } });
+    return Response.json({
+      user: { email: credentials.email, role: user.role },
+    });
   } catch (error) {
     console.error("Login failed:", error);
     return Response.json(

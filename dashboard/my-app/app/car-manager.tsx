@@ -263,24 +263,24 @@ export default function CarManager({
   return (
     <main className="min-h-screen bg-slate-100">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-4">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-5">
           <CollegeBrand subtitle={`${t("vehicleRecords")} · ${email}`} />
-          <nav className="flex flex-wrap items-center gap-2" aria-label="เมนูหลัก">
+          <nav className="flex w-full flex-wrap items-center gap-2 sm:w-auto" aria-label="เมนูหลัก">
             <Link
-              className="rounded-md bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800"
+              className="min-h-11 flex-1 rounded-md bg-blue-700 px-4 py-2 text-center text-sm font-medium text-white hover:bg-blue-800 sm:flex-none"
               href="/"
               aria-current="page"
             >
               {t("vehicleRecords")}
             </Link>
             <Link
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+              className="min-h-11 flex-1 rounded-md border border-slate-300 px-4 py-2 text-center text-sm font-medium hover:bg-slate-50 sm:flex-none"
               href="/dashboard"
             >
               {t("dashboard")}
             </Link>
             <button
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+              className="min-h-11 flex-1 rounded-md border border-slate-300 px-4 py-2 text-center text-sm font-medium hover:bg-slate-50 sm:flex-none"
               type="button"
               onClick={() => void handleLogout()}
             >
@@ -290,8 +290,8 @@ export default function CarManager({
         </div>
       </header>
 
-      <section className="mx-auto max-w-6xl px-5 py-8">
-        <div className="mb-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-gradient-to-r from-blue-950 to-blue-700 px-6 py-8 text-white sm:px-8">
+      <section className="mx-auto max-w-6xl px-4 py-6 sm:px-5 sm:py-8">
+        <div className="mb-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-gradient-to-r from-blue-950 to-blue-700 px-5 py-6 text-white sm:px-8 sm:py-8">
           <div>
             <p className="text-sm font-medium text-blue-100">
               {t("vehicleRecords")}
@@ -304,7 +304,7 @@ export default function CarManager({
             </p>
           </div>
           <button
-            className="rounded-md bg-white px-4 py-2 font-medium text-blue-900 hover:bg-blue-50"
+            className="min-h-11 w-full rounded-md bg-white px-4 py-2 font-medium text-blue-900 hover:bg-blue-50 sm:w-auto"
             type="button"
             onClick={openCreateForm}
           >
@@ -312,7 +312,7 @@ export default function CarManager({
           </button>
         </div>
 
-        <div className="mb-8 grid gap-4 sm:grid-cols-3">
+        <div className="mb-8 grid grid-cols-3 gap-2 sm:gap-4">
           {[
             {
               label: t("allVehicles"),
@@ -334,17 +334,19 @@ export default function CarManager({
             },
           ].map((stat) => (
             <article
-              className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+              className="flex min-w-0 items-center justify-between rounded-xl border border-slate-200 bg-white p-3 shadow-sm sm:p-5"
               key={stat.label}
             >
-              <div>
-                <p className="text-sm text-slate-500">{stat.label}</p>
-                <p className="mt-2 text-3xl font-bold text-slate-900">
+              <div className="min-w-0">
+                <p className="break-words text-xs leading-tight text-slate-500 sm:text-sm">
+                  {stat.label}
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900 sm:mt-2 sm:text-3xl">
                   {isLoading ? "—" : stat.value.toLocaleString("th-TH")}
                 </p>
               </div>
               <span
-                className={`flex size-11 items-center justify-center rounded-full text-sm font-bold ${stat.accent}`}
+                className={`hidden size-11 shrink-0 items-center justify-center rounded-full text-sm font-bold sm:flex ${stat.accent}`}
                 aria-hidden="true"
               >
                 {stat.icon}
@@ -353,12 +355,12 @@ export default function CarManager({
           ))}
         </div>
 
-        <label className="mb-5 block rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <label className="mb-5 block rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
           <span className="mb-2 block text-sm font-medium text-slate-700">
             {t("searchLabel")}
           </span>
           <input
-            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            className="min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={t("searchPlaceholder")}
@@ -393,7 +395,7 @@ export default function CarManager({
                 className="grid overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm md:grid-cols-[minmax(16rem,0.8fr)_minmax(0,1.6fr)]"
                 key={car.id}
               >
-                <div className="relative min-h-52 bg-slate-200 md:min-h-64">
+                <div className="relative aspect-[4/3] bg-slate-200 md:aspect-auto md:min-h-64">
                   {car.photoFilename ? (
                     <Image
                       className="object-cover"
@@ -411,36 +413,36 @@ export default function CarManager({
                     </div>
                   )}
                 </div>
-                <div className="flex min-w-0 flex-col justify-between gap-5 p-5">
+                <div className="flex min-w-0 flex-col justify-between gap-5 p-4 sm:p-5">
                   <div className="grid gap-5 sm:grid-cols-2">
-                    <div className="flex items-start justify-between gap-3 sm:col-span-2">
-                      <div>
+                    <div className="flex min-w-0 items-start justify-between gap-3 sm:col-span-2">
+                      <div className="min-w-0">
                         <p className="text-lg font-bold text-slate-900">
                           {car.plateLetters} {car.plateNumber}
                         </p>
-                        <p className="text-sm text-slate-500">{car.province}</p>
+                        <p className="break-words text-sm text-slate-500">{car.province}</p>
                       </div>
-                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
+                      <span className="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
                         {car.color}
                       </span>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-xs font-medium text-slate-500">
                         {t("vehicleDetails")}
                       </p>
-                      <p className="mt-1 text-sm font-medium text-slate-800">
+                      <p className="mt-1 break-words text-sm font-medium text-slate-800">
                         {car.brand} {car.model}
                       </p>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="text-xs font-medium text-slate-500">
                         {t("ownerDetails")}
                       </p>
-                      <p className="mt-1 font-medium text-slate-900">
+                      <p className="mt-1 break-words font-medium text-slate-900">
                         {car.ownerName}
                       </p>
                       <a
-                        className="text-sm text-blue-700 underline"
+                        className="inline-flex min-h-11 items-center break-all text-sm text-blue-700 underline"
                         href={`tel:${car.ownerPhone}`}
                       >
                         {car.ownerPhone}
@@ -449,14 +451,14 @@ export default function CarManager({
                   </div>
                   <div className="flex gap-2 border-t border-slate-100 pt-4 md:justify-end">
                     <button
-                      className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 md:flex-none md:min-w-28"
+                      className="min-h-11 flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 md:flex-none md:min-w-28"
                       type="button"
                       onClick={() => openEditForm(car)}
                     >
                       {t("edit")}
                     </button>
                     <button
-                      className="flex-1 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 md:flex-none md:min-w-28"
+                      className="min-h-11 flex-1 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 md:flex-none md:min-w-28"
                       type="button"
                       onClick={() => void handleDelete(car)}
                     >
@@ -472,7 +474,7 @@ export default function CarManager({
 
       {isFormOpen && (
         <div
-          className="fixed inset-0 z-10 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-4 sm:items-center"
+          className="fixed inset-0 z-10 flex items-start justify-center overflow-y-auto bg-slate-950/50 p-3 sm:items-center sm:p-4"
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !isSaving) {
@@ -481,7 +483,7 @@ export default function CarManager({
           }}
         >
           <section
-            className="my-auto w-full max-w-2xl rounded-xl bg-white p-6 shadow-xl"
+            className="my-auto w-full max-w-2xl rounded-xl bg-white p-3 shadow-xl sm:p-6"
             role="dialog"
             aria-modal="true"
             aria-labelledby="car-form-title"
@@ -491,7 +493,7 @@ export default function CarManager({
                 {editingCar ? t("editVehicle") : t("addVehicle")}
               </h2>
               <button
-                className="rounded px-2 py-1 text-slate-500 hover:bg-slate-100"
+                className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded px-2 py-1 text-slate-500 hover:bg-slate-100"
                 type="button"
                 onClick={() => setIsFormOpen(false)}
                 disabled={isSaving}
@@ -518,7 +520,7 @@ export default function CarManager({
                     {t("plateCategory")}
                   </span>
                   <input
-                    className="w-full rounded-md border border-slate-300 px-3 py-2"
+                    className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                     name="plateLetters"
                     defaultValue={formCar.plateLetters}
                     pattern="(?=.*[ก-ฮ])[ก-ฮ0-9]{1,3}"
@@ -531,7 +533,7 @@ export default function CarManager({
                     {t("plateNumber")}
                   </span>
                   <input
-                    className="w-full rounded-md border border-slate-300 px-3 py-2"
+                    className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                     name="plateNumber"
                     defaultValue={formCar.plateNumber}
                     inputMode="numeric"
@@ -545,7 +547,7 @@ export default function CarManager({
                     {t("province")}
                   </span>
                   <select
-                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2"
+                    className="min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 py-2"
                     name="province"
                     defaultValue={formCar.province}
                     required
@@ -593,7 +595,7 @@ export default function CarManager({
                       {t("ownerName")}
                     </span>
                     <input
-                      className="w-full rounded-md border border-slate-300 px-3 py-2"
+                      className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                       name="ownerName"
                       defaultValue={formCar.ownerName}
                       maxLength={150}
@@ -605,7 +607,7 @@ export default function CarManager({
                       {t("phoneNumber")}
                     </span>
                     <input
-                      className="w-full rounded-md border border-slate-300 px-3 py-2"
+                      className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                       name="ownerPhone"
                       type="tel"
                       autoComplete="tel"
@@ -627,7 +629,7 @@ export default function CarManager({
                       {t("brand")}
                     </span>
                     <input
-                      className="w-full rounded-md border border-slate-300 px-3 py-2"
+                      className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                       name="brand"
                       defaultValue={formCar.brand}
                       list="car-brand-options"
@@ -646,7 +648,7 @@ export default function CarManager({
                       {t("model")}
                     </span>
                     <input
-                      className="w-full rounded-md border border-slate-300 px-3 py-2"
+                      className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                       name="model"
                       defaultValue={formCar.model}
                       list="car-model-options"
@@ -662,7 +664,7 @@ export default function CarManager({
                       {t("color")}
                     </span>
                     <select
-                      className="w-full rounded-md border border-slate-300 bg-white px-3 py-2"
+                      className="min-h-11 w-full rounded-md border border-slate-300 bg-white px-3 py-2"
                       name="color"
                       value={selectedColor}
                       onChange={(event) =>
@@ -684,7 +686,7 @@ export default function CarManager({
                     </select>
                     {selectedColor === "__custom__" && (
                       <input
-                        className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2"
+                        className="mt-2 min-h-11 w-full rounded-md border border-slate-300 px-3 py-2"
                         name="customColor"
                         defaultValue={
                           carColors.some((color) => color === formCar.color)
@@ -721,7 +723,7 @@ export default function CarManager({
                     }}
                   />
                   <label
-                    className="cursor-pointer rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700 hover:bg-slate-200 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-blue-700"
+                    className="min-h-11 cursor-pointer rounded-md bg-slate-100 px-3 py-2 text-sm text-slate-700 hover:bg-slate-200 peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-blue-700"
                     htmlFor="car-photo-upload"
                   >
                     {t("selectPhoto")}
@@ -755,9 +757,9 @@ export default function CarManager({
                 )}
               </fieldset>
 
-              <div className="flex justify-end gap-3 border-t border-slate-100 pt-4">
+              <div className="grid grid-cols-2 gap-3 border-t border-slate-100 pt-4 sm:flex sm:justify-end">
                 <button
-                  className="rounded-md border border-slate-300 px-4 py-2 text-sm"
+                  className="min-h-11 w-full rounded-md border border-slate-300 px-3 py-2 text-sm sm:w-auto sm:px-4"
                   type="button"
                   onClick={() => setIsFormOpen(false)}
                   disabled={isSaving}
@@ -765,7 +767,7 @@ export default function CarManager({
                   {t("cancel")}
                 </button>
                 <button
-                  className="rounded-md bg-blue-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
+                  className="min-h-11 w-full rounded-md bg-blue-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-60 sm:w-auto sm:px-4"
                   type="submit"
                   disabled={isSaving}
                 >

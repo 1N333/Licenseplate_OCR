@@ -2,7 +2,7 @@ import { connection } from "next/server";
 import { getAuthenticatedUser } from "@/lib/auth";
 import {
   ensureDetectionsTable,
-  getDetectionPhotoForUser,
+  getSharedDetectionPhoto,
   readDetectionPhoto,
 } from "@/lib/detections";
 
@@ -22,7 +22,7 @@ export async function GET(_request: Request, { params }: RouteContext) {
     }
 
     await ensureDetectionsTable();
-    const filename = await getDetectionPhotoForUser(user.id, id);
+    const filename = await getSharedDetectionPhoto(id);
     if (!filename) {
       return Response.json({ error: "Detection photo not found." }, { status: 404 });
     }

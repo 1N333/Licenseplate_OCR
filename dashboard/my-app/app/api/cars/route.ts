@@ -36,6 +36,12 @@ export async function GET() {
     if (!user) {
       return Response.json({ error: "Please sign in." }, { status: 401 });
     }
+    if (user.role !== "office") {
+      return Response.json(
+        { error: "You do not have permission to manage vehicle records." },
+        { status: 403 },
+      );
+    }
 
     await ensureCarsTable();
     return Response.json(
@@ -57,6 +63,12 @@ export async function POST(request: Request) {
     const user = await getAuthenticatedUser();
     if (!user) {
       return Response.json({ error: "Please sign in." }, { status: 401 });
+    }
+    if (user.role !== "office") {
+      return Response.json(
+        { error: "You do not have permission to manage vehicle records." },
+        { status: 403 },
+      );
     }
 
     await ensureCarsTable();

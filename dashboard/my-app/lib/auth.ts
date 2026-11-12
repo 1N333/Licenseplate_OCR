@@ -19,14 +19,18 @@ export type Credentials = {
   password: string;
 };
 
+export type UserRole = "office" | "guard";
+
 export type AuthenticatedUser = {
   id: string;
   email: string;
+  role: UserRole;
 };
 
 interface AuthenticatedUserRow extends RowDataPacket {
   id: string;
   email: string;
+  role: UserRole;
 }
 
 let authTablesPromise: Promise<void> | undefined;
@@ -58,9 +62,24 @@ export async function ensureAuthTables(): Promise<void> {
           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
           email VARCHAR(254) NOT NULL UNIQUE,
           password_hash VARCHAR(255) NOT NULL,
+          role ENUM('office', 'guard') NOT NULL DEFAULT 'guard',
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
       `);
+      try {
+        await db.query(
+          "ALTER TABLE auth_users ADD COLUMN role ENUM('office', 'guard') NOT NULL DEFAULT 'guard' AFTER password_hash",
+        );
+      } catch (error) {
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("errno" in error) ||
+          error.errno !== 1060
+        ) {
+          throw error;
+        }
+      }
       await db.query(`
         CREATE TABLE IF NOT EXISTS auth_sessions (
           token_hash CHAR(64) NOT NULL PRIMARY KEY,
@@ -186,7 +205,7 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
 
   await ensureAuthTables();
   const [users] = await getDb().execute<AuthenticatedUserRow[]>(
-    `SELECT CAST(u.id AS CHAR) AS id, u.email
+    `SELECT CAST(u.id AS CHAR) AS id, u.email, u.role
      FROM auth_sessions s
      INNER JOIN auth_users u ON u.id = s.user_id
      WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP()
@@ -194,7 +213,9 @@ export async function getAuthenticatedUser(): Promise<AuthenticatedUser | null> 
     [hashSessionToken(token)],
   );
 
-  return users[0] ? { id: users[0].id, email: users[0].email } : null;
+  return users[0]
+    ? { id: users[0].id, email: users[0].email, role: users[0].role }
+    : null;
 }
 
 export async function deleteSession(token: string | undefined): Promise<void> {

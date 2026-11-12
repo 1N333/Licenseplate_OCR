@@ -45,6 +45,12 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     if (!user) {
       return Response.json({ error: "Please sign in." }, { status: 401 });
     }
+    if (user.role !== "office") {
+      return Response.json(
+        { error: "You do not have permission to manage vehicle records." },
+        { status: 403 },
+      );
+    }
 
     await ensureCarsTable();
     const parsed = await parseCarForm(request);
@@ -99,6 +105,12 @@ export async function DELETE(_request: Request, { params }: RouteContext) {
     const user = await getAuthenticatedUser();
     if (!user) {
       return Response.json({ error: "Please sign in." }, { status: 401 });
+    }
+    if (user.role !== "office") {
+      return Response.json(
+        { error: "You do not have permission to manage vehicle records." },
+        { status: 403 },
+      );
     }
 
     await ensureCarsTable();

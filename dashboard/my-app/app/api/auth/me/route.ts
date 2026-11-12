@@ -11,7 +11,7 @@ export async function GET() {
     }
 
     return Response.json(
-      { user: { email: user.email } },
+      { user: { email: user.email, role: user.role } },
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch (error) {

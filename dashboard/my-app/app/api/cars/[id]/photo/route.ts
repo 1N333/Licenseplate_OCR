@@ -24,6 +24,12 @@ export async function GET(_request: Request, { params }: RouteContext) {
     if (!user) {
       return Response.json({ error: "Please sign in." }, { status: 401 });
     }
+    if (user.role !== "office") {
+      return Response.json(
+        { error: "You do not have permission to manage vehicle records." },
+        { status: 403 },
+      );
+    }
 
     await ensureCarsTable();
     const filename = await getCarPhotoForUser(user.id, id);

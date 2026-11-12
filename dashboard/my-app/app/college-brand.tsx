@@ -35,7 +35,7 @@ export default function CollegeBrand({
         >
           วิทยาลัยอาชีวศึกษาสุพรรณบุรี
         </p>
-        <p className="text-sm text-slate-500">{subtitle}</p>
+        <p className="break-words text-sm text-slate-500">{subtitle}</p>
       </div>
     </div>
   );

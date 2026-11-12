@@ -1,7 +1,9 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import CollegeBrand from "./college-brand";
 import { carColors, colorGroups } from "./car-colors";
 import { carBrands, getModelsForBrand } from "./car-catalog";
 import { provinceGroups, thaiProvinces } from "./car-provinces";
@@ -134,6 +136,15 @@ export default function CarManager({
     );
   }, [cars, search]);
 
+  const brandCount = useMemo(
+    () => new Set(cars.map((car) => car.brand.trim()).filter(Boolean)).size,
+    [cars],
+  );
+  const photoCount = useMemo(
+    () => cars.filter((car) => car.photoFilename).length,
+    [cars],
+  );
+
   useEffect(() => {
     return () => {
       if (photoPreview) URL.revokeObjectURL(photoPreview);
@@ -252,35 +263,48 @@ export default function CarManager({
   return (
     <main className="min-h-screen bg-slate-100">
       <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-4">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-5 py-4">
+          <CollegeBrand subtitle={`${t("vehicleRecords")} · ${email}`} />
+          <nav className="flex flex-wrap items-center gap-2" aria-label="เมนูหลัก">
+            <Link
+              className="rounded-md bg-blue-700 px-4 py-2 text-sm font-medium text-white hover:bg-blue-800"
+              href="/"
+              aria-current="page"
+            >
               {t("vehicleRecords")}
-            </h1>
-            <p className="text-sm text-slate-500">{email}</p>
-          </div>
-          <button
-            className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
-            type="button"
-            onClick={() => void handleLogout()}
-          >
-            {t("logout")}
-          </button>
+            </Link>
+            <Link
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+              href="/dashboard"
+            >
+              {t("dashboard")}
+            </Link>
+            <button
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium hover:bg-slate-50"
+              type="button"
+              onClick={() => void handleLogout()}
+            >
+              {t("logout")}
+            </button>
+          </nav>
         </div>
       </header>
 
       <section className="mx-auto max-w-6xl px-5 py-8">
-        <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div className="mb-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-gradient-to-r from-blue-950 to-blue-700 px-6 py-8 text-white sm:px-8">
           <div>
-            <h2 className="text-2xl font-semibold text-slate-900">
+            <p className="text-sm font-medium text-blue-100">
+              {t("vehicleRecords")}
+            </p>
+            <h1 className="mt-2 text-2xl font-bold sm:text-3xl">
               {t("carOwnerDetails")}
-            </h2>
-            <p className="mt-1 text-sm text-slate-600">
-              {cars.length} {t("recordCount")}
+            </h1>
+            <p className="mt-2 text-sm text-blue-100">
+              {cars.length.toLocaleString("th-TH")} {t("recordCount")}
             </p>
           </div>
           <button
-            className="rounded-md bg-blue-700 px-4 py-2 font-medium text-white hover:bg-blue-800"
+            className="rounded-md bg-white px-4 py-2 font-medium text-blue-900 hover:bg-blue-50"
             type="button"
             onClick={openCreateForm}
           >
@@ -288,12 +312,53 @@ export default function CarManager({
           </button>
         </div>
 
-        <label className="mb-5 block max-w-xl">
-          <span className="mb-1 block text-sm font-medium text-slate-700">
+        <div className="mb-8 grid gap-4 sm:grid-cols-3">
+          {[
+            {
+              label: t("allVehicles"),
+              value: cars.length,
+              accent: "bg-blue-100 text-blue-800",
+              icon: "01",
+            },
+            {
+              label: t("vehicleBrands"),
+              value: brandCount,
+              accent: "bg-violet-100 text-violet-800",
+              icon: "02",
+            },
+            {
+              label: t("vehiclesWithPhotos"),
+              value: photoCount,
+              accent: "bg-emerald-100 text-emerald-800",
+              icon: "03",
+            },
+          ].map((stat) => (
+            <article
+              className="flex items-center justify-between rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+              key={stat.label}
+            >
+              <div>
+                <p className="text-sm text-slate-500">{stat.label}</p>
+                <p className="mt-2 text-3xl font-bold text-slate-900">
+                  {isLoading ? "—" : stat.value.toLocaleString("th-TH")}
+                </p>
+              </div>
+              <span
+                className={`flex size-11 items-center justify-center rounded-full text-sm font-bold ${stat.accent}`}
+                aria-hidden="true"
+              >
+                {stat.icon}
+              </span>
+            </article>
+          ))}
+        </div>
+
+        <label className="mb-5 block rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <span className="mb-2 block text-sm font-medium text-slate-700">
             {t("searchLabel")}
           </span>
           <input
-            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2"
+            className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             placeholder={t("searchPlaceholder")}

@@ -14,8 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ระบบจัดการข้อมูลรถ",
-  description: "ระบบบันทึกและจัดการข้อมูลรถและเจ้าของ",
+  title: "วิทยาลัยอาชีวศึกษาสุพรรณบุรี | ระบบจัดการข้อมูลรถ",
+  description:
+    "ระบบจัดการข้อมูลรถและตรวจจับป้ายทะเบียน วิทยาลัยอาชีวศึกษาสุพรรณบุรี",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

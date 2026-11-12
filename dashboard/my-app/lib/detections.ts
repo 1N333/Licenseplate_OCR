@@ -1,11 +1,7 @@
 import "server-only";
 
-import {
-  createHash,
-  randomUUID,
-  timingSafeEqual,
-} from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
 import { ensureAuthTables } from "@/lib/auth";
@@ -18,7 +14,7 @@ export const MAX_DETECTION_PHOTO_SIZE = 5 * 1024 * 1024;
 export type Detection = {
   id: string;
   plate: string;
-  direction: string;
+  direction: "in" | "out" | "unknown";
   device: string;
   detectedAt: string;
   photoFilename: string | null;
@@ -34,7 +30,7 @@ export type Detection = {
 interface DetectionRow extends RowDataPacket {
   id: string;
   plate_text: string;
-  direction: string;
+  direction: "in" | "out" | "unknown";
   device_id: string;
   detected_at: Date;
   photo_filename: string | null;
@@ -46,6 +42,16 @@ interface DetectionRow extends RowDataPacket {
   model: string | null;
   color: string | null;
 }
+
+export type ParsedDetection = {
+  plate: string;
+  direction: "in" | "out" | "unknown";
+  device: string;
+  detectedAt: Date;
+  province: string | null;
+};
+
+export class DetectionPhotoValidationError extends Error {}
 
 let tablePromise: Promise<void> | undefined;
 
@@ -73,17 +79,24 @@ export async function ensureDetectionsTable(): Promise<void> {
             FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE SET NULL
         )
       `);
-      // Tables created before the province feature lack this column: add it once.
+
       try {
         await getDb().query(
           "ALTER TABLE plate_detections ADD COLUMN province VARCHAR(100) NULL AFTER photo_filename",
         );
       } catch (error) {
-        const code = (error as { errno?: number }).errno;
-        if (code !== 1060) throw error; // 1060 = column already exists
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("errno" in error) ||
+          error.errno !== 1060
+        ) {
+          throw error;
+        }
       }
     })();
   }
+
   try {
     await tablePromise;
   } catch (error) {
@@ -92,18 +105,18 @@ export async function ensureDetectionsTable(): Promise<void> {
   }
 }
 
-/** Compare API keys in constant time (hash first so lengths always match). */
 export function apiKeyIsValid(provided: string | null): boolean {
   const expected = process.env.PLATE_API_KEY;
   if (!expected || expected.length < 16 || !provided) return false;
-  const a = createHash("sha256").update(provided).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
+  const providedHash = createHash("sha256").update(provided).digest();
+  const expectedHash = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(providedHash, expectedHash);
 }
 
 export async function getIngestUserId(): Promise<string | null> {
   const email = process.env.PLATE_OWNER_EMAIL?.trim().toLowerCase();
   if (!email) return null;
+
   await ensureAuthTables();
   const [rows] = await getDb().execute<RowDataPacket[]>(
     "SELECT CAST(id AS CHAR) AS id FROM auth_users WHERE email = ? LIMIT 1",
@@ -112,99 +125,133 @@ export async function getIngestUserId(): Promise<string | null> {
   return rows[0]?.id ?? null;
 }
 
-export type ParsedDetection = {
-  plate: string;
-  direction: "in" | "out" | "unknown";
-  device: string;
-  detectedAt: Date;
-  province: string | null;
-};
-
 export function parseDetectionFields(form: FormData): ParsedDetection | string {
   const plate = String(form.get("plate") ?? "").replace(/\s+/g, "").trim();
   if (plate.length < 1 || plate.length > 40) return "Invalid plate text.";
 
-  // The Pi sends Thai words ("เข้า"/"ออก"); also accept "in"/"out".
-  const rawDirection = String(form.get("direction") ?? "").trim().toLowerCase();
-  const direction: "in" | "out" | "unknown" =
+  const rawDirection = String(form.get("direction") ?? "")
+    .trim()
+    .toLowerCase();
+  const direction: ParsedDetection["direction"] =
     rawDirection === "in" || rawDirection === "เข้า"
       ? "in"
       : rawDirection === "out" || rawDirection === "ออก"
         ? "out"
         : "unknown";
 
-  const device = String(form.get("device") ?? "device").trim().slice(0, 60);
+  const device = String(form.get("device") ?? "device").trim();
   if (!/^[\w.\- ]{1,60}$/.test(device)) return "Invalid device name.";
 
-  // Pi sends "YYYY-MM-DD HH:MM:SS" (local time) or an ISO string.
   const rawTime = String(form.get("time") ?? "").trim();
-  let detectedAt = new Date(rawTime.replace(" ", "T"));
-  if (Number.isNaN(detectedAt.getTime())) detectedAt = new Date();
-  // Province read from the plate's second line (optional, Thai text only).
+  const detectedAt = rawTime
+    ? new Date(rawTime.replace(" ", "T"))
+    : new Date();
+  if (Number.isNaN(detectedAt.getTime())) return "Invalid detection time.";
+
   const rawProvince = String(form.get("province") ?? "").trim();
-  const province = /^[\u0E00-\u0E7F ]{2,100}$/.test(rawProvince) ? rawProvince : null;
+  const province = /^[\u0E00-\u0E7F ]{2,100}$/.test(rawProvince)
+    ? rawProvince
+    : null;
+
   return { plate, direction, device, detectedAt, province };
 }
 
-export async function saveDetectionPhoto(photo: File): Promise<string | null> {
+export async function saveDetectionPhoto(photo: File): Promise<string> {
+  if (photo.size === 0 || photo.size > MAX_DETECTION_PHOTO_SIZE) {
+    throw new DetectionPhotoValidationError(
+      "Detection photo must be 5 MB or smaller.",
+    );
+  }
+
   const content = Buffer.from(await photo.arrayBuffer());
   if (content.length === 0 || content.length > MAX_DETECTION_PHOTO_SIZE) {
-    return null;
+    throw new DetectionPhotoValidationError(
+      "Detection photo must be 5 MB or smaller.",
+    );
   }
-  let extension: string;
-  if (content.length >= 3 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) {
+
+  let extension: "jpg" | "png";
+  if (
+    photo.type === "image/jpeg" &&
+    content.length >= 3 &&
+    content[0] === 0xff &&
+    content[1] === 0xd8 &&
+    content[2] === 0xff
+  ) {
     extension = "jpg";
   } else if (
+    photo.type === "image/png" &&
     content.length >= 8 &&
-    content.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    content.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
   ) {
     extension = "png";
   } else {
-    return null;
+    throw new DetectionPhotoValidationError(
+      "Upload a valid JPEG or PNG detection photo.",
+    );
   }
+
   await mkdir(uploadDirectory, { recursive: true });
   const filename = `${randomUUID()}.${extension}`;
   await writeFile(join(uploadDirectory, filename), content, { flag: "wx" });
   return filename;
 }
 
+export async function removeDetectionPhoto(filename: string): Promise<void> {
+  await unlink(join(uploadDirectory, filename));
+}
+
 export async function insertDetection(
   userId: string,
-  d: ParsedDetection,
+  detection: ParsedDetection,
   photoFilename: string | null,
-): Promise<{ id: string; carId: string | null }> {
+): Promise<{ id: string; matched: boolean }> {
   const db = getDb();
-  // Match against this account's registry: letters+number (spaces ignored),
-  // and the province too when the Pi managed to read it.
-  const plateSql = `SELECT CAST(id AS CHAR) AS id FROM cars
-     WHERE user_id = ?
-       AND REPLACE(CONCAT(plate_letters, plate_number), ' ', '') = ?`;
+  const plateQuery = `SELECT CAST(id AS CHAR) AS id FROM cars
+    WHERE user_id = ?
+      AND REPLACE(CONCAT(plate_letters, plate_number), ' ', '') = ?`;
   let carId: string | null = null;
-  if (d.province) {
-    const [exact] = await db.execute<RowDataPacket[]>(
-      `${plateSql} AND province = ? ORDER BY id LIMIT 1`,
-      [userId, d.plate, d.province],
+
+  if (detection.province) {
+    const [matchingCars] = await db.execute<RowDataPacket[]>(
+      `${plateQuery} AND province = ? ORDER BY id LIMIT 1`,
+      [userId, detection.plate, detection.province],
     );
-    carId = exact[0]?.id ?? null;
+    carId = matchingCars[0]?.id ?? null;
   }
+
   if (!carId) {
-    // Province unreadable or different: accept only when exactly one car has this plate.
-    const [any] = await db.execute<RowDataPacket[]>(
-      `${plateSql} ORDER BY id LIMIT 2`,
-      [userId, d.plate],
+    const [matchingCars] = await db.execute<RowDataPacket[]>(
+      `${plateQuery} ORDER BY id LIMIT 2`,
+      [userId, detection.plate],
     );
-    if (any.length === 1) carId = any[0].id;
+    if (matchingCars.length === 1) carId = matchingCars[0].id;
   }
+
   const [result] = await db.execute<ResultSetHeader>(
     `INSERT INTO plate_detections
        (user_id, plate_text, direction, device_id, detected_at, photo_filename, province, car_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [userId, d.plate, d.direction, d.device, d.detectedAt, photoFilename, d.province, carId],
+    [
+      userId,
+      detection.plate,
+      detection.direction,
+      detection.device,
+      detection.detectedAt,
+      photoFilename,
+      detection.province,
+      carId,
+    ],
   );
-  return { id: String(result.insertId), carId };
+  return { id: String(result.insertId), matched: carId !== null };
 }
 
-export async function listDetections(userId: string, limit = 50): Promise<Detection[]> {
+export async function listDetections(
+  userId: string,
+  limit = 50,
+): Promise<Detection[]> {
   const safeLimit = Math.min(Math.max(Math.trunc(limit) || 50, 1), 200);
   const [rows] = await getDb().execute<DetectionRow[]>(
     `SELECT CAST(p.id AS CHAR) AS id, p.plate_text, p.direction, p.device_id,
@@ -217,20 +264,21 @@ export async function listDetections(userId: string, limit = 50): Promise<Detect
      LIMIT ${safeLimit}`,
     [userId],
   );
-  return rows.map((r) => ({
-    id: r.id,
-    plate: r.plate_text,
-    direction: r.direction,
-    device: r.device_id,
-    detectedAt: r.detected_at.toISOString(),
-    photoFilename: r.photo_filename,
-    province: r.province,
-    carProvince: r.car_province,
-    matched: r.car_id !== null,
-    ownerName: r.owner_name,
-    brand: r.brand,
-    model: r.model,
-    color: r.color,
+
+  return rows.map((row) => ({
+    id: row.id,
+    plate: row.plate_text,
+    direction: row.direction,
+    device: row.device_id,
+    detectedAt: row.detected_at.toISOString(),
+    photoFilename: row.photo_filename,
+    province: row.province,
+    carProvince: row.car_province,
+    matched: row.car_id !== null,
+    ownerName: row.owner_name,
+    brand: row.brand,
+    model: row.model,
+    color: row.color,
   }));
 }
 
@@ -247,7 +295,7 @@ export async function getDetectionPhotoForUser(
 
 export async function readDetectionPhoto(filename: string): Promise<Buffer> {
   if (!/^[0-9a-f-]{36}\.(jpg|png)$/.test(filename)) {
-    throw new Error("Invalid photo name");
+    throw new Error("Invalid detection photo filename.");
   }
   return readFile(join(uploadDirectory, filename));
 }

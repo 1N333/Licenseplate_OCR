@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLanguage } from "./i18n";
 
 type Detection = {
   id: string;
   plate: string;
-  direction: string;
+  direction: "in" | "out" | "unknown";
   device: string;
   detectedAt: string;
   photoFilename: string | null;
@@ -18,110 +19,221 @@ type Detection = {
   color: string | null;
 };
 
-const directionLabel: Record<string, string> = {
-  in: "เข้า",
-  out: "ออก",
-  unknown: "-",
-};
+type DirectionFilter = "all" | "in" | "out";
 
 export default function DetectionsPanel() {
+  const { t } = useLanguage();
   const [rows, setRows] = useState<Detection[]>([]);
   const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [filter, setFilter] = useState<DirectionFilter>("all");
+  const isRequestInProgress = useRef(false);
 
-  useEffect(() => {
-    let active = true;
-    async function load() {
-      try {
-        const res = await fetch("/api/detections?limit=30", { cache: "no-store" });
-        const data = (await res.json()) as { detections?: Detection[]; error?: string };
-        if (!active) return;
-        if (!res.ok) throw new Error(data.error ?? "load failed");
-        setRows(data.detections ?? []);
-        setError("");
-      } catch {
-        if (active) setError("โหลดประวัติป้ายทะเบียนไม่สำเร็จ");
+  const loadDetections = useCallback(async (signal?: AbortSignal) => {
+    if (signal?.aborted || isRequestInProgress.current) return;
+    isRequestInProgress.current = true;
+    setIsRefreshing(true);
+
+    try {
+      const response = await fetch("/api/detections?limit=30", {
+        signal,
+        cache: "no-store",
+      });
+      const data = (await response.json()) as {
+        detections?: Detection[];
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error ?? "Could not load detections.");
+
+      setRows(data.detections ?? []);
+      setError("");
+    } catch (loadError) {
+      if (loadError instanceof DOMException && loadError.name === "AbortError") {
+        return;
+      }
+      setError(t("detectionLoadFailed"));
+    } finally {
+      isRequestInProgress.current = false;
+      if (!signal?.aborted) {
+        setIsLoading(false);
+        setIsRefreshing(false);
       }
     }
-    void load();
-    const timer = setInterval(load, 5000); // refresh every 5 s
+  }, [t]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const initialLoad = setTimeout(() => {
+      void loadDetections(controller.signal);
+    }, 0);
+    const timer = setInterval(() => {
+      void loadDetections(controller.signal);
+    }, 5000);
+
     return () => {
-      active = false;
+      controller.abort();
+      clearTimeout(initialLoad);
       clearInterval(timer);
     };
-  }, []);
+  }, [loadDetections]);
+
+  const visibleRows = useMemo(
+    () => rows.filter((row) => filter === "all" || row.direction === filter),
+    [filter, rows],
+  );
+  const incomingCount = rows.filter((row) => row.direction === "in").length;
+  const outgoingCount = rows.filter((row) => row.direction === "out").length;
 
   return (
-    <section className="mx-auto my-6 w-full max-w-6xl rounded-xl bg-white p-6 shadow">
-      <h2 className="mb-1 text-lg font-semibold">ป้ายทะเบียนที่ตรวจจับได้ (Raspberry Pi)</h2>
-      <p className="mb-4 text-sm text-slate-500">อัปเดตอัตโนมัติทุก 5 วินาที</p>
-      {error && <p className="mb-3 text-sm text-red-600">{error}</p>}
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm">
-          <thead className="border-b text-slate-500">
+    <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">
+            {t("detectionsTitle")}
+          </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            {t("detectionsDescription")} · {rows.length} {t("detectionsCount")}
+          </p>
+        </div>
+        <button
+          className="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-60"
+          type="button"
+          onClick={() => void loadDetections()}
+          disabled={isRefreshing}
+        >
+          {isRefreshing ? t("pleaseWait") : t("refresh")}
+        </button>
+      </div>
+
+      <div className="grid gap-3 border-b border-slate-100 p-5 sm:grid-cols-2">
+        {([
+          ["in", t("incoming"), incomingCount, "bg-emerald-50 text-emerald-800"],
+          ["out", t("outgoing"), outgoingCount, "bg-amber-50 text-amber-800"],
+        ] as const).map(([direction, label, count, accent]) => (
+          <article
+            className="flex items-center justify-between rounded-lg border border-slate-200 px-4 py-3"
+            key={direction}
+          >
+            <span className="font-medium text-slate-700">{label}</span>
+            <span className={`rounded-full px-3 py-1 text-sm font-bold ${accent}`}>
+              {count.toLocaleString("th-TH")}
+            </span>
+          </article>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-2 px-5 pt-4">
+        {(
+          [
+            ["all", t("allDirections"), "bg-blue-700"],
+            ["in", t("entered"), "bg-emerald-700"],
+            ["out", t("exited"), "bg-amber-600"],
+          ] as const
+        ).map(([direction, label, activeColor]) => (
+          <button
+            className={`rounded-full px-3 py-1.5 text-sm font-medium ${
+              filter === direction
+                ? `${activeColor} text-white`
+                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+            }`}
+            key={direction}
+            type="button"
+            aria-pressed={filter === direction}
+            onClick={() => setFilter(direction)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {error && (
+        <p
+          className="mx-5 mt-4 rounded-md bg-red-50 p-3 text-sm text-red-800"
+          role="alert"
+        >
+          {error}
+        </p>
+      )}
+
+      <div className="overflow-x-auto p-5">
+        <table className="w-full min-w-[850px] text-left text-sm">
+          <thead className="border-b border-slate-200 text-slate-500">
             <tr>
-              <th className="py-2 pr-3">เวลา</th>
-              <th className="pr-3">ทิศทาง</th>
-              <th className="pr-3">ป้ายทะเบียน</th>
-              <th className="pr-3">จังหวัด</th>
-              <th className="pr-3">สถานะ</th>
-              <th className="pr-3">เจ้าของ / รถ</th>
-              <th className="pr-3">อุปกรณ์</th>
-              <th>ภาพ</th>
+              <th className="py-3 pr-4 font-medium">{t("detectedAt")}</th>
+              <th className="pr-4 font-medium">{t("direction")}</th>
+              <th className="pr-4 font-medium">{t("detectedPlate")}</th>
+              <th className="pr-4 font-medium">{t("detectedProvince")}</th>
+              <th className="pr-4 font-medium">{t("detectionStatus")}</th>
+              <th className="pr-4 font-medium">{t("detectedOwner")}</th>
+              <th className="pr-4 font-medium">{t("detectionDevice")}</th>
+              <th className="font-medium">{t("detectionPhoto")}</th>
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.id} className="border-b last:border-0">
-                <td className="py-2 pr-3 whitespace-nowrap">
-                  {new Date(r.detectedAt).toLocaleString("th-TH")}
+          <tbody className="divide-y divide-slate-100">
+            {visibleRows.map((row) => (
+              <tr key={row.id}>
+                <td className="whitespace-nowrap py-3 pr-4 text-slate-600">
+                  {new Date(row.detectedAt).toLocaleString("th-TH")}
                 </td>
-                <td className="pr-3">{directionLabel[r.direction] ?? r.direction}</td>
-                <td className="pr-3 font-semibold">{r.plate}</td>
-                <td className="pr-3">
-                  {r.province ? (
-                    r.province
-                  ) : r.carProvince ? (
-                    <span
-                      className="italic text-slate-400"
-                      title="กล้องอ่านจังหวัดไม่ได้ แสดงจากทะเบียนรถที่ลงไว้"
-                    >
-                      {r.carProvince}
-                    </span>
-                  ) : (
-                    "-"
-                  )}
+                <td className="pr-4">
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                      row.direction === "in"
+                        ? "bg-emerald-100 text-emerald-800"
+                        : row.direction === "out"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    {row.direction === "in"
+                      ? t("entered")
+                      : row.direction === "out"
+                        ? t("exited")
+                        : t("unknownDirection")}
+                  </span>
                 </td>
-                <td className="pr-3">
-                  {r.matched ? (
-                    <span className="rounded bg-green-100 px-2 py-0.5 text-green-700">ในทะเบียน</span>
-                  ) : (
-                    <span className="rounded bg-amber-100 px-2 py-0.5 text-amber-700">ไม่รู้จัก</span>
-                  )}
+                <td className="pr-4 font-semibold text-slate-900">{row.plate}</td>
+                <td className="pr-4 text-slate-600">
+                  {row.province || row.carProvince || "—"}
                 </td>
-                <td className="pr-3">
-                  {r.matched ? `${r.ownerName} · ${r.brand} ${r.model} (${r.color})` : "-"}
+                <td className="pr-4">
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                      row.matched
+                        ? "bg-green-100 text-green-700"
+                        : "bg-amber-100 text-amber-700"
+                    }`}
+                  >
+                    {row.matched ? t("registeredStatus") : t("unrecognizedStatus")}
+                  </span>
                 </td>
-                <td className="pr-3">{r.device}</td>
+                <td className="pr-4 text-slate-600">
+                  {row.matched
+                    ? `${row.ownerName} · ${row.brand} ${row.model} (${row.color})`
+                    : "—"}
+                </td>
+                <td className="pr-4 text-slate-600">{row.device}</td>
                 <td>
-                  {r.photoFilename ? (
+                  {row.photoFilename ? (
                     <a
-                      className="text-blue-600 underline"
-                      href={`/api/detections/${r.id}/photo`}
+                      className="font-medium text-blue-700 hover:underline"
+                      href={`/api/detections/${row.id}/photo`}
                       target="_blank"
                       rel="noreferrer"
                     >
-                      ดูภาพ
+                      {t("viewDetectionPhoto")}
                     </a>
                   ) : (
-                    "-"
+                    "—"
                   )}
                 </td>
               </tr>
             ))}
-            {rows.length === 0 && !error && (
+            {visibleRows.length === 0 && (
               <tr>
-                <td colSpan={8} className="py-6 text-center text-slate-400">
-                  ยังไม่มีข้อมูล
+                <td colSpan={8} className="py-10 text-center text-slate-500">
+                  {isLoading ? t("loadingCars") : t("noDetections")}
                 </td>
               </tr>
             )}
